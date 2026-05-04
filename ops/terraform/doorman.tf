@@ -24,7 +24,7 @@ resource "openstack_compute_instance_v2" "doorman" {
   depends_on = [openstack_compute_instance_v2.core]
 }
 
-resource "openstack_compute_floatingip_associate_v2" "doorman" {
+resource "openstack_networking_floatingip_associate_v2" "doorman" {
   floating_ip = data.openstack_networking_floatingip_v2.doorman.address
-  instance_id = openstack_compute_instance_v2.doorman.id
+  port_id     = openstack_compute_instance_v2.doorman.network[0].port
 }
