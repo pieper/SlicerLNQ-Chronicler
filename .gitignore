@@ -1,0 +1,24 @@
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+
+# Local secrets / cloud config
+clouds.yaml
+*.pem
+*.key
+!*.pub.key
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Node (for future watchman)
+node_modules/
+npm-debug.log
