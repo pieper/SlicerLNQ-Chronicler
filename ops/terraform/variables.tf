@@ -1,9 +1,3 @@
-variable "cloud_name" {
-  description = "Cloud alias from clouds.yaml (or OS_CLOUD env var)"
-  type        = string
-  default     = "openstack"
-}
-
 variable "domain_name" {
   description = "Public hostname; A record must already point at floating_ip"
   type        = string

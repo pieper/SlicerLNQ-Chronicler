@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Serialize state-mutating runs across apply.yml and destroy.yml.
+concurrency:
+  group: lnq-chronicler-state
+  cancel-in-progress: false
+
 jobs:
   apply:
     if: ${{ github.event.inputs.confirm == 'apply' }}
@@ -27,7 +32,6 @@ jobs:
       OS_APPLICATION_CREDENTIAL_SECRET: ${{ secrets.OS_APP_CRED_SECRET }}
       OS_INTERFACE: public
       OS_IDENTITY_API_VERSION: "3"
-      TF_VAR_cloud_name: openstack
       TF_VAR_domain_name: ${{ secrets.DOMAIN_NAME }}
       TF_VAR_floating_ip_address: ${{ secrets.FLOATING_IP }}
       TF_VAR_letsencrypt_email: ${{ secrets.LETSENCRYPT_EMAIL }}
@@ -37,36 +41,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install openstack CLI
+        run: pip install --quiet python-openstackclient python-swiftclient
+
       - uses: opentofu/setup-opentofu@v1
         with:
           tofu_version: "1.8.0"
 
-      - name: Write clouds.yaml for Terraform
+      - name: Pull state from Swift (if any)
         run: |
-          mkdir -p ~/.config/openstack
-          cat > ~/.config/openstack/clouds.yaml <<EOF
-          clouds:
-            openstack:
-              auth_type: v3applicationcredential
-              auth:
-                auth_url: ${{ secrets.OS_AUTH_URL }}
-                application_credential_id: ${{ secrets.OS_APP_CRED_ID }}
-                application_credential_secret: ${{ secrets.OS_APP_CRED_SECRET }}
-              region_name: ${{ secrets.OS_REGION_NAME }}
-              interface: public
-              identity_api_version: 3
-          EOF
+          if openstack object show lnq-chronicler-tfstate terraform.tfstate >/dev/null 2>&1; then
+            openstack object save lnq-chronicler-tfstate terraform.tfstate
+            echo "Pulled prior state from Swift."
+          else
+            echo "No prior state in Swift — first run."
+          fi
 
       - name: tofu init
-        run: |
-          tofu init \
-            -backend-config="auth_url=${{ secrets.OS_AUTH_URL }}" \
-            -backend-config="region_name=${{ secrets.OS_REGION_NAME }}" \
-            -backend-config="application_credential_id=${{ secrets.OS_APP_CRED_ID }}" \
-            -backend-config="application_credential_secret=${{ secrets.OS_APP_CRED_SECRET }}"
+        run: tofu init -input=false
 
       - name: tofu apply
         run: tofu apply -auto-approve -input=false
 
       - name: Show outputs
         run: tofu output
+
+      - name: Push state to Swift
+        if: always()
+        run: |
+          if [ -f terraform.tfstate ]; then
+            openstack object create lnq-chronicler-tfstate terraform.tfstate
+            # Timestamped archive copy for history
+            ts=$(date -u +%Y%m%dT%H%M%SZ)
+            openstack object create lnq-chronicler-tfstate-archive terraform.tfstate \
+              --name "terraform-${ts}.tfstate"
+            echo "Pushed state and archive copy (${ts})."
+          else
+            echo "No state file to push."
+          fi

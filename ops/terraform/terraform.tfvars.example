@@ -1,7 +1,9 @@
 # Copy to terraform.tfvars (gitignored) for local runs.
 # In CI, these come from GitHub secrets via workflow env vars.
+#
+# Authentication: set OS_CLOUD=<your-cloud-alias-in-clouds.yaml> in your
+# shell before running tofu locally. The provider reads it directly.
 
-cloud_name              = "CIS230102_IU"
 domain_name             = "lnq-chronicle.isomics.dev"
 floating_ip_address     = "149.165.152.66"
 letsencrypt_email       = "you@example.com"

@@ -1,5 +1,7 @@
 provider "openstack" {
-  cloud = var.cloud_name
+  # Authentication via OS_* environment variables.
+  # Locally, set OS_CLOUD=<your-cloud-alias> from your clouds.yaml.
+  # In CI, the workflow sets OS_AUTH_TYPE / OS_APPLICATION_CREDENTIAL_*.
 }
 
 data "openstack_networking_floatingip_v2" "doorman" {
