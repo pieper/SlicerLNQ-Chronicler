@@ -29,11 +29,10 @@ write_files:
     permissions: "0644"
     encoding: b64
     content: ${watchman_package_json_b64}
-
-  - path: /opt/lnq/watchman/package-lock.json
-    permissions: "0644"
-    encoding: b64
-    content: ${watchman_package_lock_b64}
+  # Note: package-lock.json deliberately NOT embedded here. Including it
+  # pushed user_data over OpenStack Nova's ~64KB limit and instance
+  # creation failed. We use `npm install` (not `npm ci`) below; fastify
+  # is the only declared dep so the resolution drift is negligible.
 
   # Watchman env file — written initially as 0600 root-only (the secrets are
   # readable only by root until the watchman user exists). Tightened to
@@ -154,7 +153,7 @@ runcmd:
   - chmod 0640 /etc/lnq/watchman.env
 
   - chown -R watchman:watchman /opt/lnq/watchman
-  - sudo -u watchman -H bash -lc 'cd /opt/lnq/watchman && npm ci --omit=dev'
+  - sudo -u watchman -H bash -lc 'cd /opt/lnq/watchman && npm install --omit=dev'
 
   # --- start everything -----------------------------------------------
   # Caddy was already started by its package postinst with the package
