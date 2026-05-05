@@ -55,9 +55,9 @@ variable "tenant_network_name" {
 }
 
 variable "dicomweb_server_ref" {
-  description = "Git ref of dcmjs-org/dicomweb-server to build at first boot"
+  description = "Git ref (branch / tag / commit SHA) of dcmjs-org/dicomweb-server to build at first boot"
   type        = string
-  default     = "main"
+  default     = "master"
 }
 
 variable "couchdb_version" {

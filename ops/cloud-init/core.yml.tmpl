@@ -109,7 +109,11 @@ runcmd:
   - chmod 0640 /etc/lnq/dicomweb-server.env
 
   - install -d -o lnq -g lnq /opt/lnq
-  - git clone --branch ${dicomweb_server_ref} https://github.com/dcmjs-org/dicomweb-server.git /opt/lnq/dicomweb-server
+  # Clone the default branch first, then checkout whatever ref is requested.
+  # Works for branches, tags, and commit SHAs, and avoids the master/main
+  # default-branch surprise that would otherwise be a silent failure.
+  - git clone https://github.com/dcmjs-org/dicomweb-server.git /opt/lnq/dicomweb-server
+  - git -C /opt/lnq/dicomweb-server checkout ${dicomweb_server_ref}
   - chown -R lnq:lnq /opt/lnq/dicomweb-server
   - sudo -u lnq -H bash -lc 'cd /opt/lnq/dicomweb-server && npm ci --omit=dev'
 
