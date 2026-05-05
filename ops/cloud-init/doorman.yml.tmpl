@@ -124,7 +124,11 @@ runcmd:
     }
     CADDYEOF
 
+  # `install -d` only sets ownership on the directory itself. The Caddy
+  # package's postinst pre-creates /var/log/caddy/access.log as root:root,
+  # so we need a recursive chown to make Caddy able to write its log.
   - install -d -o caddy -g caddy /var/log/caddy
+  - chown -R caddy:caddy /var/log/caddy
 
   # --- Node.js 20 from NodeSource (for the watchman) -------------------
   - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
