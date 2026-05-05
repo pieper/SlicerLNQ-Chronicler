@@ -65,3 +65,33 @@ variable "couchdb_version" {
   type        = string
   default     = "3.5.1"
 }
+
+# --- Watchman (activity-driven shelve/unshelve) -------------------------
+
+variable "idle_timeout_sec" {
+  description = "Seconds of no real activity before the watchman shelves the core"
+  type        = number
+  default     = 1200 # 20 minutes
+}
+
+variable "os_auth_url" {
+  description = "OpenStack Keystone auth URL (used by the watchman to talk to Js2)"
+  type        = string
+}
+
+variable "os_region_name" {
+  description = "OpenStack region (used by the watchman)"
+  type        = string
+}
+
+variable "watchman_os_app_cred_id" {
+  description = "OpenStack application credential ID for the watchman (shelve/unshelve only)"
+  type        = string
+  sensitive   = true
+}
+
+variable "watchman_os_app_cred_secret" {
+  description = "OpenStack application credential secret for the watchman"
+  type        = string
+  sensitive   = true
+}

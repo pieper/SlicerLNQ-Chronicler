@@ -1,6 +1,8 @@
 #cloud-config
-# Doorman: Caddy as TLS terminator + reverse proxy. Native systemd, no Docker.
-# Watchman service for activity-driven shelve/unshelve lands in a later commit.
+# Doorman: Caddy (TLS + public proxy) + Watchman (activity-driven shelve/wake).
+# Caddy proxies all non-health traffic to the watchman on 127.0.0.1:5990.
+# The watchman either forwards to the core or serves a placeholder + triggers
+# unshelve. Native systemd, no Docker.
 
 package_update: true
 package_upgrade: false
@@ -12,25 +14,83 @@ packages:
   - debian-keyring
   - debian-archive-keyring
   - apt-transport-https
+  - python3-pip
+  - python3-venv
+
+write_files:
+  # Watchman source files, base64-encoded by Terraform's `base64encode(file(...))`.
+  # Lives outside the apt-managed file space so no conffile interaction.
+  - path: /opt/lnq/watchman/index.js
+    permissions: "0644"
+    encoding: b64
+    content: ${watchman_index_js_b64}
+
+  - path: /opt/lnq/watchman/package.json
+    permissions: "0644"
+    encoding: b64
+    content: ${watchman_package_json_b64}
+
+  # Watchman env file — written initially as 0600 root-only (the secrets are
+  # readable only by root until the watchman user exists). Tightened to
+  # 0640 root:watchman in runcmd after the user is created.
+  - path: /etc/lnq/watchman.env
+    permissions: "0600"
+    content: |
+      WATCHMAN_PORT=5990
+      CORE_HOST=${core_internal_ip}
+      CORE_COUCHDB_PORT=5984
+      CORE_DICOMWEB_PORT=5985
+      CORE_INSTANCE_NAME=${core_instance_name}
+      IDLE_TIMEOUT_SEC=${idle_timeout_sec}
+      STATS_FILE=/var/lib/watchman/stats.json
+
+      # OpenStack auth used by the `openstack` CLI for shelve/unshelve.
+      OS_AUTH_TYPE=v3applicationcredential
+      OS_AUTH_URL=${os_auth_url}
+      OS_REGION_NAME=${os_region_name}
+      OS_INTERFACE=public
+      OS_IDENTITY_API_VERSION=3
+      OS_APPLICATION_CREDENTIAL_ID=${watchman_os_app_cred_id}
+      OS_APPLICATION_CREDENTIAL_SECRET='${watchman_os_app_cred_secret}'
+
+  - path: /etc/systemd/system/lnq-watchman.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=LNQ Watchman (activity-driven shelve/wake for the Chronicle core)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=watchman
+      Group=watchman
+      WorkingDirectory=/opt/lnq/watchman
+      EnvironmentFile=/etc/lnq/watchman.env
+      ExecStart=/usr/bin/node /opt/lnq/watchman/index.js
+      Restart=on-failure
+      RestartSec=5
+      LimitNOFILE=65536
+      # Stats persistence directory. systemd creates and owns this.
+      StateDirectory=watchman
+      StateDirectoryMode=0750
+
+      [Install]
+      WantedBy=multi-user.target
 
 runcmd:
   # --- Caddy from Cloudsmith repo --------------------------------------
-  # Cloudsmith's debian.deb.txt already includes a signed-by= directive
-  # pointing at /usr/share/keyrings/caddy-stable-archive-keyring.gpg, so
-  # we put the dearmored key there and consume the file verbatim.
   - curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   - curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o /etc/apt/sources.list.d/caddy-stable.list
 
   - apt-get update
-  # noninteractive in case any package config prompts; here it's belt-and-suspenders.
   - DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
 
-  # Overwrite the package's default Caddyfile with our reverse-proxy config.
-  # CRITICAL: do NOT pre-place /etc/caddy/Caddyfile via cloud-init's
-  # write_files. Doing so triggers dpkg's conffile-conflict prompt during
-  # `apt install caddy`, which has no stdin to answer with — the install
-  # then aborts mid-configure, the postinst that creates the `caddy` user
-  # never runs, and the systemd unit fails 217/USER on every start.
+  # Overwrite the package default Caddyfile. Caddy now hands everything to
+  # the watchman; the watchman handles routing to core:5984 (CouchDB) and
+  # core:5985 (dicomweb-server, with /dicomweb prefix stripped internally).
+  # /health/doorman is served directly by Caddy so external monitors don't
+  # generate activity signals that defeat the idle timer.
   - |
     cat > /etc/caddy/Caddyfile <<'CADDYEOF'
     {
@@ -40,22 +100,18 @@ runcmd:
     ${domain_name} {
       encode gzip
 
-      # CouchDB API surface lives at the root for now.
-      # /_utils (Fauxton) is included; protected by CouchDB admin auth.
-      reverse_proxy ${core_internal_ip}:5984
-
-      # DICOMweb endpoints are mounted under /dicomweb/.
-      # The dcmjs-org server expects to receive these paths verbatim;
-      # strip_prefix is intentionally not used.
-      handle_path /dicomweb/* {
-        reverse_proxy ${core_internal_ip}:5985
-      }
-
-      # Health check used by external monitors. Never proxied; the watchman
-      # (added in a later commit) recognizes this path and excludes it from
-      # the activity signal.
       respond /health/doorman 200 {
         body "ok"
+      }
+
+      reverse_proxy 127.0.0.1:5990 {
+        # The watchman is on the same host. If it's down briefly during a
+        # reload, Caddy retries; we don't want a long timeout to make pages
+        # feel hung.
+        transport http {
+          dial_timeout 2s
+          response_header_timeout 30s
+        }
       }
 
       log {
@@ -69,7 +125,31 @@ runcmd:
     CADDYEOF
 
   - install -d -o caddy -g caddy /var/log/caddy
-  - systemctl enable --now caddy
-  - systemctl reload caddy
 
-final_message: "doorman ready; Caddy serving ${domain_name}"
+  # --- Node.js 20 from NodeSource (for the watchman) -------------------
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  - apt-get install -y nodejs
+
+  # --- openstack CLI (the watchman shells out to this for shelve/unshelve)
+  - python3 -m venv /opt/lnq/openstack-venv
+  - /opt/lnq/openstack-venv/bin/pip install --quiet python-openstackclient
+  # Symlink so `openstack` is on PATH for the watchman service
+  - ln -sf /opt/lnq/openstack-venv/bin/openstack /usr/local/bin/openstack
+
+  # --- watchman service user + npm install ----------------------------
+  - getent group watchman >/dev/null || groupadd -r watchman
+  - id -u watchman >/dev/null 2>&1 || useradd -r -g watchman -d /opt/lnq/watchman -s /usr/sbin/nologin watchman
+
+  # Tighten env file ownership/perms now that the watchman user exists.
+  - chown root:watchman /etc/lnq/watchman.env
+  - chmod 0640 /etc/lnq/watchman.env
+
+  - chown -R watchman:watchman /opt/lnq/watchman
+  - sudo -u watchman -H bash -lc 'cd /opt/lnq/watchman && npm ci --omit=dev'
+
+  # --- start everything -----------------------------------------------
+  - systemctl daemon-reload
+  - systemctl enable --now lnq-watchman.service
+  - systemctl enable --now caddy
+
+final_message: "doorman ready; Caddy + Watchman serving ${domain_name}"

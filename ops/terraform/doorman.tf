@@ -19,9 +19,17 @@ resource "openstack_compute_instance_v2" "doorman" {
   }
 
   user_data = templatefile("${path.module}/../cloud-init/doorman.yml.tmpl", {
-    domain_name       = var.domain_name
-    letsencrypt_email = var.letsencrypt_email
-    core_internal_ip  = openstack_compute_instance_v2.core.access_ip_v4
+    domain_name              = var.domain_name
+    letsencrypt_email        = var.letsencrypt_email
+    core_internal_ip         = openstack_compute_instance_v2.core.access_ip_v4
+    core_instance_name       = openstack_compute_instance_v2.core.name
+    idle_timeout_sec         = var.idle_timeout_sec
+    os_auth_url              = var.os_auth_url
+    os_region_name           = var.os_region_name
+    watchman_os_app_cred_id     = var.watchman_os_app_cred_id
+    watchman_os_app_cred_secret = var.watchman_os_app_cred_secret
+    watchman_index_js_b64       = base64encode(file("${path.module}/../watchman/index.js"))
+    watchman_package_json_b64   = base64encode(file("${path.module}/../watchman/package.json"))
   })
 
   metadata = {

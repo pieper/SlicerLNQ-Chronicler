@@ -31,6 +31,10 @@ jobs:
       TF_VAR_letsencrypt_email: ${{ secrets.LETSENCRYPT_EMAIL }}
       TF_VAR_couchdb_admin_password: ${{ secrets.COUCHDB_ADMIN_PASSWORD }}
       TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_os_auth_url: ${{ secrets.OS_AUTH_URL }}
+      TF_VAR_os_region_name: ${{ secrets.OS_REGION_NAME }}
+      TF_VAR_watchman_os_app_cred_id: ${{ secrets.WATCHMAN_OS_APP_CRED_ID }}
+      TF_VAR_watchman_os_app_cred_secret: ${{ secrets.WATCHMAN_OS_APP_CRED_SECRET }}
 
     steps:
       - uses: actions/checkout@v4
