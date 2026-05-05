@@ -25,7 +25,12 @@ write_files:
     permissions: "0600"
     content: |
       DB_SERVER=http://admin:${couchdb_admin_password}@127.0.0.1:5984
-      NODE_ENV=production
+      # dcmjs-org/dicomweb-server's config/index.js does
+      #   require('./' + process.env.NODE_ENV)
+      # and the upstream repo only ships config/development.js. Setting
+      # NODE_ENV=production crashes with MODULE_NOT_FOUND. Stay on development
+      # until a production config is contributed upstream.
+      NODE_ENV=development
       PORT=5985
 
   - path: /etc/systemd/system/lnq-dicomweb.service
