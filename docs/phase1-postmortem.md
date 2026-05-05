@@ -41,6 +41,16 @@ For long-lived infra: pin provider major versions in `versions.tf` and read the 
 - Caddy's automatic TLS. Once DNS pointed at the right IP and the unit could actually start, ACME got us a real cert in <90 seconds with no further intervention.
 - The split between `architecture.md` (intent) and the Chronicler repo (mechanism). When debugging, "what is this supposed to do?" was always answerable by reading docs in `SlicerLNQ/`, separately from the question of whether the implementation was buggy.
 
+## Phase 2, commit 1 (watchman) — four follow-up fixes
+
+Adding the watchman service in `6663cbc` introduced four regressions that took another half-day to walk through. None were architectural; all were variations on the same lessons phase 1 surfaced, which is the more useful diagnostic.
+
+| Commit | Symptom | Root cause |
+|---|---|---|
+| `c2fa67d` + `019db02` | `npm ci` failed EUSAGE on every fresh apply | The lockfile had to land in *two* places: committed to the repo (commit 1), and added to the cloud-init's base64-embedded files (commit 2). I did the first and forgot the second. The repo had `package-lock.json` but the cloud-init didn't ship it to the instance. |
+| `e76504a` | Caddy listening on :80 only, no auto-HTTPS, all curls hang | The phase-1 cloud-init ended with `systemctl reload caddy`. I dropped that line restructuring runcmd for watchman. The Caddy package's postinst starts caddy with the package default Caddyfile during `apt install`; when runcmd later overwrites the Caddyfile, caddy doesn't pick it up without a reload. |
+| `2693af6` | Caddy fails to start on second restart with "permission denied" on access.log | The Caddy package's postinst pre-creates `/var/log/caddy/access.log` as `root:root`. Our `install -d -o caddy /var/log/caddy` sets ownership on the directory but doesn't recurse into pre-existing files. When Caddy tries to write the log it gets EACCES and exits. Need `chown -R` after `install -d`. |
+
 ## Future hardening (not phase 1 work)
 
 1. **Wrap risky `runcmd` blocks in `bash -euo pipefail`** so silent cascades become loud failures in the cloud-init log. Bug #4 cost an hour because the subsequent commands swallowed the real error.
@@ -48,3 +58,7 @@ For long-lived infra: pin provider major versions in `versions.tf` and read the 
 3. **Build a Js2 image with the heavy installs baked in** (CouchDB, Node 20, Caddy, dicomweb-server source) once the cloud-init is stable. First-boot time drops from ~7 min to ~1 min, and apt-source drift (bug #3) doesn't bite per-deploy.
 4. **Add a runbook for Js2 floating-IP reaping.** Js2 reclaims unattached FIPs after some hours; ours got reaped during an overnight shelve. Document either keeping a no-op attachment or accepting the IP-and-DNS rotation cost.
 5. **Document the `exouser` vs `ubuntu` SSH user variance.** Featured Js2 images use `ubuntu` for the cloud-image default; `exouser` is added by Exosphere when *Exosphere* provisions the instance. Terraform-provisioned instances only get `ubuntu`.
+6. **Add `tofu validate` + `tofu plan -refresh-only` as a pre-merge gate** in the plan workflow. The lockfile bug (`019db02`) — base64-encoding a file that wasn't passed to `templatefile()` — is exactly what `tofu validate` catches. Cheap to add, real value.
+7. **Replace manual base64-embedding of the watchman files** with a `for_each` over `fileset("${path.module}/../watchman", "*.{js,json}")` (or similar). The current pattern requires synchronizing two lists by hand: files in the repo and files in the templatefile call. That's a permanent footgun; whoever forks Chronicler will hit it.
+8. **Always pair `apt install <package>` with `systemctl reload <service>` after writing custom configs.** The Caddy reload regression (`e76504a`) was the second time we got bitten by "package starts service with its default config; our config never takes effect." Make this an explicit pattern in the cloud-init style.
+9. **Always pair `install -d <pkg-managed dir>` with `chown -R`.** Same package-pre-creates-files class of bug as the access.log issue. Belt-and-suspenders against postinst surprises.
