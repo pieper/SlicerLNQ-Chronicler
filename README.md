@@ -43,4 +43,4 @@ docs/               # First-time setup, runbook references
 
 ## Status
 
-Phase 1 — initial stand-up. Conservator / auto-shelve, OIDC, runbooks, and the LNQ schema/views land in subsequent commits per the architecture doc's phase plan.
+Phase 1 — initial stand-up. Watchman / auto-shelve, OIDC, runbooks, and the LNQ schema/views land in subsequent commits per the architecture doc's phase plan.
