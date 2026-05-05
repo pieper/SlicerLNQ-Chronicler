@@ -30,6 +30,7 @@ resource "openstack_compute_instance_v2" "doorman" {
     watchman_os_app_cred_secret = var.watchman_os_app_cred_secret
     watchman_index_js_b64       = base64encode(file("${path.module}/../watchman/index.js"))
     watchman_package_json_b64   = base64encode(file("${path.module}/../watchman/package.json"))
+    watchman_package_lock_b64   = base64encode(file("${path.module}/../watchman/package-lock.json"))
   })
 
   metadata = {

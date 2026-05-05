@@ -30,6 +30,11 @@ write_files:
     encoding: b64
     content: ${watchman_package_json_b64}
 
+  - path: /opt/lnq/watchman/package-lock.json
+    permissions: "0644"
+    encoding: b64
+    content: ${watchman_package_lock_b64}
+
   # Watchman env file — written initially as 0600 root-only (the secrets are
   # readable only by root until the watchman user exists). Tightened to
   # 0640 root:watchman in runcmd after the user is created.
