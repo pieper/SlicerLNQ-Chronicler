@@ -1,6 +1,6 @@
 #cloud-config
 # Doorman: Caddy as TLS terminator + reverse proxy. Native systemd, no Docker.
-# Watchman service for activity-driven shelve/unshelve lands in a later commit.
+# Conservator service for activity-driven shelve/unshelve lands in a later commit.
 
 package_update: true
 package_upgrade: false
@@ -51,7 +51,7 @@ runcmd:
         reverse_proxy ${core_internal_ip}:5985
       }
 
-      # Health check used by external monitors. Never proxied; the watchman
+      # Health check used by external monitors. Never proxied; the conservator
       # (added in a later commit) recognizes this path and excludes it from
       # the activity signal.
       respond /health/doorman 200 {

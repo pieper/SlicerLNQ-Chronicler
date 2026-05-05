@@ -34,15 +34,15 @@ In the repo: Settings → Secrets and variables → Actions. The full set:
 | `OS_REGION_NAME` | `IU` |
 | `OS_APP_CRED_ID` | `chronicler-actions` credential ID |
 | `OS_APP_CRED_SECRET` | `chronicler-actions` credential secret |
-| `WATCHMAN_OS_APP_CRED_ID` | `chronicler-watchman` credential ID (used in a later commit) |
-| `WATCHMAN_OS_APP_CRED_SECRET` | `chronicler-watchman` credential secret (used in a later commit) |
+| `CONSERVATOR_OS_APP_CRED_ID` | `chronicler-conservator` credential ID (used in a later commit) |
+| `CONSERVATOR_OS_APP_CRED_SECRET` | `chronicler-conservator` credential secret (used in a later commit) |
 | `SSH_PUBLIC_KEY` | contents of `~/.ssh/lnq-chronicler-deploy.pub` (one line) |
 | `COUCHDB_ADMIN_PASSWORD` | output of `openssl rand -base64 32` |
 | `LETSENCRYPT_EMAIL` | your email for Let's Encrypt notices |
 | `FLOATING_IP` | your reserved floating IP, e.g. `149.165.152.66` |
 | `DOMAIN_NAME` | `lnq-chronicle.isomics.dev` |
 
-The watchman secrets aren't used yet but adding them now means the next commit doesn't need to wait on you.
+The conservator secrets aren't used yet but adding them now means the next commit doesn't need to wait on you.
 
 The private SSH deploy key (`~/.ssh/lnq-chronicler-deploy`) is **not** yet wired into a workflow — it's used by future runbooks that SSH into the instances. Add it as `SSH_DEPLOY_KEY` when those workflows land.
 
