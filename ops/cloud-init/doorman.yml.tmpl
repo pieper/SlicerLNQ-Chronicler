@@ -13,57 +13,60 @@ packages:
   - debian-archive-keyring
   - apt-transport-https
 
-write_files:
-  - path: /etc/caddy/Caddyfile
-    permissions: "0644"
-    defer: true
-    content: |
-      {
-        email ${letsencrypt_email}
-      }
-
-      ${domain_name} {
-        encode gzip
-
-        # CouchDB API surface lives at the root for now.
-        # /_utils (Fauxton) is included; protected by CouchDB admin auth.
-        reverse_proxy ${core_internal_ip}:5984
-
-        # DICOMweb endpoints are mounted under /dicomweb/.
-        # The dcmjs-org server expects to receive these paths verbatim;
-        # strip_prefix is intentionally not used.
-        handle_path /dicomweb/* {
-          reverse_proxy ${core_internal_ip}:5985
-        }
-
-        # Health check used by external monitors. Never proxied; the watchman
-        # (added in a later commit) recognizes this path and excludes it from
-        # the activity signal.
-        respond /health/doorman 200 {
-          body "ok"
-        }
-
-        log {
-          output file /var/log/caddy/access.log {
-            roll_size 10mb
-            roll_keep 5
-          }
-          format json
-        }
-      }
-
 runcmd:
   # --- Caddy from Cloudsmith repo --------------------------------------
   # Cloudsmith's debian.deb.txt already includes a signed-by= directive
   # pointing at /usr/share/keyrings/caddy-stable-archive-keyring.gpg, so
-  # we put the dearmored key there and consume the file verbatim. (Earlier
-  # versions of debian.deb.txt didn't have signed-by= and required a sed
-  # injection — that fight produced a malformed double-signed-by entry.)
+  # we put the dearmored key there and consume the file verbatim.
   - curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   - curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o /etc/apt/sources.list.d/caddy-stable.list
 
   - apt-get update
-  - apt-get install -y caddy
+  # noninteractive in case any package config prompts; here it's belt-and-suspenders.
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+
+  # Overwrite the package's default Caddyfile with our reverse-proxy config.
+  # CRITICAL: do NOT pre-place /etc/caddy/Caddyfile via cloud-init's
+  # write_files. Doing so triggers dpkg's conffile-conflict prompt during
+  # `apt install caddy`, which has no stdin to answer with — the install
+  # then aborts mid-configure, the postinst that creates the `caddy` user
+  # never runs, and the systemd unit fails 217/USER on every start.
+  - |
+    cat > /etc/caddy/Caddyfile <<'CADDYEOF'
+    {
+      email ${letsencrypt_email}
+    }
+
+    ${domain_name} {
+      encode gzip
+
+      # CouchDB API surface lives at the root for now.
+      # /_utils (Fauxton) is included; protected by CouchDB admin auth.
+      reverse_proxy ${core_internal_ip}:5984
+
+      # DICOMweb endpoints are mounted under /dicomweb/.
+      # The dcmjs-org server expects to receive these paths verbatim;
+      # strip_prefix is intentionally not used.
+      handle_path /dicomweb/* {
+        reverse_proxy ${core_internal_ip}:5985
+      }
+
+      # Health check used by external monitors. Never proxied; the watchman
+      # (added in a later commit) recognizes this path and excludes it from
+      # the activity signal.
+      respond /health/doorman 200 {
+        body "ok"
+      }
+
+      log {
+        output file /var/log/caddy/access.log {
+          roll_size 10mb
+          roll_keep 5
+        }
+        format json
+      }
+    }
+    CADDYEOF
 
   - install -d -o caddy -g caddy /var/log/caddy
   - systemctl enable --now caddy
