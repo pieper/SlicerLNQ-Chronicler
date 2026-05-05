@@ -148,8 +148,13 @@ runcmd:
   - sudo -u watchman -H bash -lc 'cd /opt/lnq/watchman && npm ci --omit=dev'
 
   # --- start everything -----------------------------------------------
+  # Caddy was already started by its package postinst with the package
+  # default Caddyfile; we need an explicit reload so it picks up the
+  # config we wrote in the heredoc step above. Without this, Caddy stays
+  # on the welcome-page config (port 80 only, no auto-HTTPS) indefinitely.
   - systemctl daemon-reload
   - systemctl enable --now lnq-watchman.service
   - systemctl enable --now caddy
+  - systemctl reload caddy
 
 final_message: "doorman ready; Caddy + Watchman serving ${domain_name}"
