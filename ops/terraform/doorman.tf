@@ -41,7 +41,14 @@ resource "openstack_compute_instance_v2" "doorman" {
     project = "lnq"
   }
 
-  depends_on = [openstack_compute_instance_v2.core]
+  # Serialize doorman creation: wait until both the core is up AND the FIP is
+  # fully bound to the port. Otherwise Terraform fires the server-create in
+  # parallel with the FIP-associate modify, and Nova rejects the bind because
+  # the port is mid-mutation by Neutron.
+  depends_on = [
+    openstack_compute_instance_v2.core,
+    openstack_networking_floatingip_associate_v2.doorman,
+  ]
 }
 
 resource "openstack_networking_floatingip_associate_v2" "doorman" {
