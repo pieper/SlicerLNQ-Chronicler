@@ -1,46 +1,72 @@
 # SlicerLNQ-Chronicler
 
-Operational repository for **SlicerLNQ-Chronicle**, the CouchDB + dicomweb-server backend for the [SlicerLNQ](https://github.com/pieper/SlicerLNQ) project, hosted on [Jetstream2](https://jetstream-cloud.org/).
+Lifecycle scripts for **SlicerLNQ-Chronicle**, the CouchDB + dicomweb-server backend for the [SlicerLNQ](https://github.com/pieper/SlicerLNQ) project on [Jetstream2](https://jetstream-cloud.org/).
 
-This repo defines the full lifecycle of the Chronicle instance: Terraform/OpenTofu for the VMs and storage, cloud-init for first-boot provisioning, Docker Compose for the running services, and GitHub Actions workflows that drive lifecycle and routine maintenance.
-
-Architectural context lives in [SlicerLNQ/docs/architecture.md](https://github.com/pieper/SlicerLNQ/blob/main/docs/architecture.md). This README covers the operating side only.
+One Js2 instance, one shell script, no automation surface to fight. Public TLS via Caddy + Let's Encrypt. Designed for a single operator running a public-data research project — generous on simplicity, sparing on abstractions.
 
 ## Topology
 
 ```
-Internet → doorman (m3.tiny, public FIP, Caddy + TLS)
-           └→ core (m3.medium, internal-only, CouchDB + dicomweb-server)
+Internet → lnq-chronicle.isomics.dev (FIP)
+            │
+            ▼
+        ┌─────────────────────────────┐
+        │   m3.medium (Featured-      │
+        │   Ubuntu24)                 │
+        │                             │
+        │   Caddy (80/443)            │
+        │     ↓                       │
+        │     ├─ /          → CouchDB         (127.0.0.1:5984)
+        │     ├─ /dicomweb/ → dicomweb-server (127.0.0.1:5985)
+        │     └─ /health    → 200 ok
+        └─────────────────────────────┘
 ```
 
-The doorman is the only public entry point. The core is reachable only over the Js2 tenant network. Activity-driven shelve/unshelve is added in a later commit.
+All services run as native systemd units. Caddy fronts both APIs over TLS. CouchDB and dicomweb-server bind to localhost only — Caddy is the only public surface.
 
-## First-time setup
+## Usage
 
-Before the first `apply`, see [docs/first-time-setup.md](docs/first-time-setup.md) for the one-shot tasks: creating the Swift container that holds Terraform state, confirming GitHub Actions secrets are set, and verifying DNS.
+```sh
+# Once: copy and fill in your config
+cp chronicle.conf.example chronicle.conf
+$EDITOR chronicle.conf
 
-## Running
+# Create the instance (server create + cloud-init + FIP attach)
+bin/chronicle.sh create
 
-Lifecycle is driven by GitHub Actions workflows under `.github/workflows/`:
+# Watch first-boot install (~5–10 min)
+bin/chronicle.sh logs
 
-- `plan.yml` — runs on PRs touching `ops/terraform/`. Reports the plan as a comment.
-- `apply.yml` — manual `workflow_dispatch`. Brings up or updates the topology.
-- `destroy.yml` — manual `workflow_dispatch` with explicit confirmation. Tears everything down except the floating IP, the Swift state container, and the DNS record (those are intentionally outside Terraform's blast radius).
+# When ready:
+curl -i https://lnq-chronicle.isomics.dev/
+curl -i https://lnq-chronicle.isomics.dev/dicomweb/studies
 
-You should not need to run `tofu` locally for routine operations. Local runs are useful for development of the Terraform itself.
+# Other commands
+bin/chronicle.sh status
+bin/chronicle.sh ssh
+bin/chronicle.sh destroy
+```
+
+That's the whole interface.
 
 ## Repository layout
 
 ```
+bin/
+  chronicle.sh             # the lifecycle script (~150 lines)
 ops/
-  terraform/        # OpenTofu sources for Js2 resources
-  cloud-init/       # First-boot provisioning templates for both instances
-                    # (services run as native systemd units; no Docker)
-  runbooks/         # Operator scripts (backup, restore, health) — added later
-.github/workflows/  # GitHub Actions for lifecycle and maintenance
-docs/               # First-time setup, runbook references
+  cloud-init/
+    chronicle.yml.tmpl     # first-boot setup; envsubst'd by chronicle.sh
+chronicle.conf.example     # copy to chronicle.conf (gitignored) and fill in
+docs/
+  setup.md                 # one-time prerequisites (FIP, DNS, key, secret)
+  phase1-postmortem.md     # historical: bugs hit during the original
+                           # Terraform-based attempt; lessons that motivated
+                           # the simplification you're looking at
 ```
 
-## Status
+The previous Terraform/CI-based architecture lives on the [`terraform-experiment`](https://github.com/pieper/SlicerLNQ-Chronicler/tree/terraform-experiment) branch in case it's useful later.
 
-Phase 1 — initial stand-up. Watchman / auto-shelve, OIDC, runbooks, and the LNQ schema/views land in subsequent commits per the architecture doc's phase plan.
+## Architectural context
+
+Design intent for the broader SlicerLNQ project — Chronicle data model, document schemas, agent pattern, phase plan — lives in the sibling repo: [SlicerLNQ/docs/architecture.md](https://github.com/pieper/SlicerLNQ/blob/main/docs/architecture.md). This repo is purely the operational layer.
