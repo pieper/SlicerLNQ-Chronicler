@@ -12,10 +12,15 @@ FLAVOR=m3.medium
 NETWORK=auto_allocated_network
 KEY_NAME=lnq-chronicler-deploy
 
-# Comma-separated list of security groups attached at create time. These need
-# to allow at least 22 (SSH), 80 (HTTP, for ACME), and 443 (HTTPS). On Js2,
-# the project's "exosphere" group covers all of these out of the box.
-SECURITY_GROUPS=default,exosphere
+# Comma-separated list of security groups attached at create time. The
+# script creates the "lnq-public" group automatically (TCP 22/80/443) on
+# first run; "default" is the project default needed for internal traffic.
+# Override here if you have an existing group you'd rather use.
+SECURITY_GROUPS=default,lnq-public
+
+# Name of the auto-created public-facing security group. Created with
+# exactly TCP 22, 80, 443 ingress from anywhere if it doesn't exist.
+PUBLIC_SECGROUP=lnq-public
 
 # --- SSH -------------------------------------------------------------
 # Private half of the keypair you registered as KEY_NAME above.

@@ -27,7 +27,8 @@ source "$CONFIG_FILE"
 : "${KEY_NAME:?}" "${SSH_KEY:?}" "${SSH_USER:?}"
 : "${DOMAIN_NAME:?}" "${FLOATING_IP:?}" "${LETSENCRYPT_EMAIL:?}" "${COUCHDB_ADMIN_PASSWORD:?}"
 : "${DICOMWEB_REF:=master}"
-: "${SECURITY_GROUPS:=default,exosphere}"
+: "${SECURITY_GROUPS:=default,lnq-public}"
+: "${PUBLIC_SECGROUP:=lnq-public}"
 
 OS=(openstack --os-cloud "$OS_CLOUD")
 
@@ -37,12 +38,31 @@ get_ip() {
     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | tail -1
 }
 
+# Create the lnq-public security group with exactly TCP 22/80/443 if it
+# doesn't already exist. Idempotent — re-running create just verifies it.
+ensure_public_secgroup() {
+  if "${OS[@]}" security group show "$PUBLIC_SECGROUP" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "Creating $PUBLIC_SECGROUP security group (TCP 22, 80, 443)..."
+  "${OS[@]}" security group create \
+    --description "SSH + HTTP + HTTPS for SlicerLNQ-Chronicle" \
+    "$PUBLIC_SECGROUP" >/dev/null
+  for port in 22 80 443; do
+    "${OS[@]}" security group rule create \
+      --protocol tcp --dst-port "$port" --remote-ip 0.0.0.0/0 \
+      "$PUBLIC_SECGROUP" >/dev/null
+  done
+}
+
 # --- commands --------------------------------------------------------
 cmd_create() {
   if "${OS[@]}" server show "$INSTANCE_NAME" >/dev/null 2>&1; then
     echo "Instance '$INSTANCE_NAME' already exists. Run '$0 destroy' first, or '$0 ssh'." >&2
     exit 1
   fi
+
+  ensure_public_secgroup
 
   local userdata
   userdata=$(mktemp)
