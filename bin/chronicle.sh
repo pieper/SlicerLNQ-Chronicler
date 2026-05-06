@@ -45,7 +45,6 @@ cmd_create() {
 
   local userdata
   userdata=$(mktemp)
-  trap 'rm -f "$userdata"' EXIT
 
   # envsubst with a whitelist — only these names are substituted; other
   # $VAR uses inside the cloud-init heredocs are left alone.
@@ -69,6 +68,8 @@ cmd_create() {
 
   echo "Attaching $FLOATING_IP..."
   "${OS[@]}" server add floating ip "$INSTANCE_NAME" "$FLOATING_IP"
+
+  rm -f "$userdata"
 
   echo
   echo "Created. Cloud-init still running on the instance (~5-10 min)."
