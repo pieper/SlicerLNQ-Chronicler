@@ -59,14 +59,14 @@ runcmd:
   - curl -fsSL https://couchdb.apache.org/repo/keys.asc | gpg --dearmor -o /etc/apt/keyrings/couchdb-archive-keyring.gpg
   - |
     . /etc/os-release
-    echo "deb [signed-by=/etc/apt/keyrings/couchdb-archive-keyring.gpg] https://apache.jfrog.io/artifactory/couchdb-deb/ $${VERSION_CODENAME} main" \
+    echo "deb [signed-by=/etc/apt/keyrings/couchdb-archive-keyring.gpg] https://apache.jfrog.io/artifactory/couchdb-deb/ ${VERSION_CODENAME} main" \
       > /etc/apt/sources.list.d/couchdb.list
 
   - |
     cat <<EOF | debconf-set-selections
     couchdb couchdb/mode select standalone
     couchdb couchdb/bindaddress string 127.0.0.1
-    couchdb couchdb/cookie string $$(openssl rand -hex 16)
+    couchdb couchdb/cookie string $(openssl rand -hex 16)
     couchdb couchdb/adminpass password ${COUCHDB_ADMIN_PASSWORD}
     couchdb couchdb/adminpass_again password ${COUCHDB_ADMIN_PASSWORD}
     EOF

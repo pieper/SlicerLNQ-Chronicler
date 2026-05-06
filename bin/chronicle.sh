@@ -27,6 +27,7 @@ source "$CONFIG_FILE"
 : "${KEY_NAME:?}" "${SSH_KEY:?}" "${SSH_USER:?}"
 : "${DOMAIN_NAME:?}" "${FLOATING_IP:?}" "${LETSENCRYPT_EMAIL:?}" "${COUCHDB_ADMIN_PASSWORD:?}"
 : "${DICOMWEB_REF:=master}"
+: "${SECURITY_GROUPS:=default,exosphere}"
 
 OS=(openstack --os-cloud "$OS_CLOUD")
 
@@ -56,12 +57,21 @@ cmd_create() {
     < ops/cloud-init/chronicle.yml.tmpl \
     > "$userdata"
 
-  echo "Creating $INSTANCE_NAME ($FLAVOR / $IMAGE)..."
+  # Build --security-group flags from the comma-separated SECURITY_GROUPS.
+  local sg_args=()
+  local IFS=','
+  for sg in $SECURITY_GROUPS; do
+    sg_args+=(--security-group "$sg")
+  done
+  unset IFS
+
+  echo "Creating $INSTANCE_NAME ($FLAVOR / $IMAGE; secgroups: $SECURITY_GROUPS)..."
   "${OS[@]}" server create \
     --image "$IMAGE" \
     --flavor "$FLAVOR" \
     --network "$NETWORK" \
     --key-name "$KEY_NAME" \
+    "${sg_args[@]}" \
     --user-data "$userdata" \
     --wait \
     "$INSTANCE_NAME" >/dev/null
