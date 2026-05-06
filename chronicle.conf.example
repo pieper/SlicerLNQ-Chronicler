@@ -1,0 +1,37 @@
+# Copy this to chronicle.conf and fill in your values. chronicle.conf is gitignored.
+# Sourced by bin/chronicle.sh.
+
+# --- OpenStack (Js2) -------------------------------------------------
+# Cloud alias from your ~/.config/openstack/clouds.yaml.
+OS_CLOUD=CIS230102_IU
+
+# --- Instance --------------------------------------------------------
+INSTANCE_NAME=lnq-chronicle
+IMAGE=Featured-Ubuntu24
+FLAVOR=m3.medium
+NETWORK=auto_allocated_network
+KEY_NAME=lnq-chronicler-deploy
+
+# --- SSH -------------------------------------------------------------
+# Private half of the keypair you registered as KEY_NAME above.
+SSH_KEY=$HOME/.ssh/lnq-chronicler-deploy
+# Default user on Js2 Featured-Ubuntu24 images.
+SSH_USER=ubuntu
+
+# --- Public-facing ---------------------------------------------------
+DOMAIN_NAME=lnq-chronicle.isomics.dev
+# Reserve this in advance: `openstack floating ip create public`.
+# A record for $DOMAIN_NAME must point at $FLOATING_IP.
+FLOATING_IP=149.165.154.240
+LETSENCRYPT_EMAIL=you@example.com
+
+# --- CouchDB ---------------------------------------------------------
+# IMPORTANT: must be URL-safe (no /, +, =). Generate with:
+#   openssl rand -hex 32
+# (Base64-encoded passwords break DB_SERVER URL parsing.)
+COUCHDB_ADMIN_PASSWORD=fill-with-openssl-rand-hex-32-output
+
+# --- dcmjs-org/dicomweb-server git ref ------------------------------
+# Branch, tag, or commit SHA to check out at first boot. Default is upstream
+# master. Override here when iterating on a fork or pinning a specific commit.
+DICOMWEB_REF=master

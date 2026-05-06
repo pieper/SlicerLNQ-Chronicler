@@ -1,11 +1,5 @@
-# Terraform
-**/.terraform/
-**/.terraform.lock.hcl
-*.tfstate
-*.tfstate.*
-*.tfplan
-*.tfvars
-!*.tfvars.example
+# Local config (contains secrets)
+chronicle.conf
 
 # Local secrets / cloud config
 clouds.yaml
@@ -18,7 +12,3 @@ clouds.yaml
 *.swp
 .vscode/
 .idea/
-
-# Node (for future watchman)
-node_modules/
-npm-debug.log
