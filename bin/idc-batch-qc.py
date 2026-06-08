@@ -141,6 +141,21 @@ def compute_case_stats(paths):
     return out
 
 
+def _extra_anatomy_volume_mL(seg_path, ct_path):
+    """Volume of the foreground voxels in `seg_path` in mL, computed via
+    voxel spacing from the CT (so reviewer-facing volumes match the
+    geometry they're looking at in the slice view). Empty string if the
+    SEG file isn't present yet — keeps the QC pass partial-friendly."""
+    if not os.path.isfile(seg_path) or not os.path.isfile(ct_path):
+        return ""
+    import SimpleITK as sitk
+    seg = sitk.ReadImage(seg_path)
+    ct  = sitk.ReadImage(ct_path)
+    arr = sitk.GetArrayFromImage(seg)
+    vml = voxel_volume_mL(ct)
+    return round(int((arr > 0).sum()) * vml, 2)
+
+
 def render_overlay_png(paths, out_png, low_max=0.05):
     """Pick the slice with the largest combined GT + pred footprint,
     render an axial overlay PNG. low_max sets the upper end of the
@@ -215,6 +230,16 @@ def main():
     ap.add_argument("--png-low-max", type=float, default=0.05,
                     help="Upper end of the Inferno colormap window. "
                     "Lower = brighter faint signal.")
+    ap.add_argument("--extra-anatomies", default="",
+                    help="Comma-separated additional model names whose predicted "
+                    "volume (mL) we should fold into the same qc.csv as one "
+                    "extra column per model — e.g. abdominopelvic-v1,"
+                    "axillary-v1,inguinal-v1. Used to surface non-mediastinal "
+                    "node detections in the LNQReview cohort table so a "
+                    "reviewer can sort 'which cases had axillary signal?' "
+                    "Each extra model is read from "
+                    "<stage>/predictions/<model>/<case>.nrrd; cases missing the "
+                    "SEG land an empty cell, not a crash.")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
@@ -236,6 +261,10 @@ def main():
         print("nothing to QC yet.")
         return
 
+    extra_models = [m.strip() for m in args.extra_anatomies.split(",") if m.strip()]
+    if extra_models:
+        print(f"extra anatomies: {','.join(extra_models)}", flush=True)
+
     rows = []
     for i, case_id in enumerate(cases, 1):
         paths = case_paths(predictions_root, nrrd_root, case_id)
@@ -246,6 +275,10 @@ def main():
             print(f"[{i:3d}/{len(cases)}] {case_id}: skip (missing CT or prob)",
                   flush=True)
             continue
+        for m in extra_models:
+            extra_pred = os.path.join(args.stage_root, "predictions", m,
+                                       f"{case_id}.nrrd")
+            stats[f"{m}_volume_mL"] = _extra_anatomy_volume_mL(extra_pred, paths["ct"])
         rows.append(stats)
 
         if not args.no_png:
