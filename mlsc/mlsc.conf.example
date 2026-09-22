@@ -1,0 +1,66 @@
+# mlsc.conf — settings for the PCCT → LNQ pipeline on the Martinos MLSC cluster.
+#
+# Copy to $WORK/mlsc.conf (default /vast/lnq/pdac-processing/mlsc.conf) or point
+# MLSC_CONF at it. Sourced by run_pipeline.sh, which turns these into sbatch flags;
+# the *.sbatch files themselves carry no site-specific values.
+#
+# Etiquette reminders (https://it.martinos.org/mlsc-etiquette/):
+#   * --mem and --time are mandatory; request what a tested job needs, not "just in case".
+#   * keep GPU_CONCURRENCY at 6-8 or lower when `showpending` shows the queue is busy.
+#   * CPU-only stages go to the basic partition.
+#   * ~3 CPUs per GPU on the RTX nodes.
+
+ACCOUNT=lnqmlsc
+
+# ---- paths ------------------------------------------------------------------
+ROOT=/vast/lnq
+INPUT=$ROOT/PCCT_exemplary_cases        # rclone'd DICOM studies (read-only to the pipeline)
+WORK=$ROOT/pdac-processing              # everything the pipeline writes
+ENV=$ROOT/env                           # python venv (setup-env.sbatch)
+MODELS_CACHE=$ROOT/models               # LNQ_SEGMENTER_CACHE (weights, ~16 GB for 4 models)
+NNUNET_BASE=$ROOT/nnunet                # dummy nnUNet_raw/preprocessed/results dirs
+
+# Interpreter used to create the venv. nnunetv2 needs >= 3.9; if the node's
+# python3 is older, point this at a newer one (see probe output).
+PYTHON=python3
+# torch wheel index. cu126 needs NVIDIA driver >= 525 (check probe output);
+# fall back to https://download.pytorch.org/whl/cu118 for older drivers.
+TORCH_INDEX=https://download.pytorch.org/whl/cu126
+# Where lnq-segmenter comes from (pip spec).
+LNQ_SEGMENTER_SPEC="git+https://github.com/pieper/lnq-segmenter.git"
+
+# ---- models -----------------------------------------------------------------
+MODELS="mediastinal-v1 axillary-v1 inguinal-v1 abdominopelvic-v1"
+
+# ---- partitions ---------------------------------------------------------------
+CPU_PARTITION=basic
+# Set after `run_pipeline.sh bench` + bench_report.py: lightest partition that fits.
+GPU_PARTITION=rtx6000
+BENCH_PARTITIONS="rtx6000 rtx8000 dgx-a100"
+
+# ---- staging (DICOM -> NRRD, CPU) ---------------------------------------------
+STAGE_CPUS=4
+STAGE_MEM=24G
+STAGE_TIME=0-02:00:00
+STAGE_CONCURRENCY=20                    # %N on the staging job array
+MIN_SLICES=20
+
+# ---- inference (GPU) ------------------------------------------------------------
+PREDICT_CPUS=3
+PREDICT_MEM=96G                         # revise from bench_report.py (1.3 x peak RSS)
+PREDICT_TIME=0-08:00:00
+GPU_CONCURRENCY=6                       # %N on the predict job array (total GPUs in use)
+CHUNK_SIZE=8                            # volumes per (model, chunk) array task
+
+# ---- bench ----------------------------------------------------------------------
+BENCH_MEM=128G
+BENCH_TIME=0-04:00:00
+
+# ---- qc (CPU) --------------------------------------------------------------------
+QC_CPUS=2
+QC_MEM=32G
+QC_TIME=0-04:00:00
+
+# ---- notifications ---------------------------------------------------------------
+MAIL_TYPE=END,FAIL
+# MAIL_USER=you@mgh.harvard.edu        # optional; Slurm uses the account default otherwise
