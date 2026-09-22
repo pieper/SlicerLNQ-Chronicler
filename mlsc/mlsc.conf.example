@@ -20,11 +20,14 @@ ENV=$ROOT/env                           # python venv (setup-env.sbatch)
 MODELS_CACHE=$ROOT/models               # LNQ_SEGMENTER_CACHE (weights, ~16 GB for 4 models)
 NNUNET_BASE=$ROOT/nnunet                # dummy nnUNet_raw/preprocessed/results dirs
 
-# Interpreter used to create the venv. nnunetv2 needs >= 3.9; if the node's
-# python3 is older, point this at a newer one (see probe output).
-PYTHON=python3
-# torch wheel index. cu126 needs NVIDIA driver >= 525 (check probe output);
-# fall back to https://download.pytorch.org/whl/cu118 for older drivers.
+# Interpreter for the venv. Default "uv:3.11" = a relocatable CPython 3.11
+# installed by uv under $ROOT/python, which runs on every partition (the
+# nodes mix Rocky 8 / Rocky 9 / Ubuntu 24.04 and no single system python
+# exists on all of them). Set to a path such as /usr/bin/python3.11 to use a
+# system interpreter instead (then check it exists on every partition you use).
+PYTHON=uv:3.11
+# torch wheel index. cu126 needs NVIDIA driver >= 525 (probe 2026-09-22: 580 on
+# all GPU nodes); fall back to https://download.pytorch.org/whl/cu118 for older drivers.
 TORCH_INDEX=https://download.pytorch.org/whl/cu126
 # Where lnq-segmenter comes from (pip spec).
 LNQ_SEGMENTER_SPEC="git+https://github.com/pieper/lnq-segmenter.git"
@@ -35,6 +38,8 @@ MODELS="mediastinal-v1 axillary-v1 inguinal-v1 abdominopelvic-v1"
 # ---- partitions ---------------------------------------------------------------
 CPU_PARTITION=basic
 # Set after `run_pipeline.sh bench` + bench_report.py: lightest partition that fits.
+# (probe 2026-09-22: rtx6000 = Quadro RTX 6000 24 GB, rtx8000 = RTX A6000 48 GB,
+#  dgx-a100 = A100 40 GB)
 GPU_PARTITION=rtx6000
 BENCH_PARTITIONS="rtx6000 rtx8000 dgx-a100"
 

@@ -64,8 +64,9 @@ cp ~/SlicerLNQ-Chronicler/mlsc/mlsc.conf.example mlsc.conf     # edit paths if n
 M=~/SlicerLNQ-Chronicler/mlsc/run_pipeline.sh
 
 $M probe            # one 10-min job per partition: python, driver, scratch, network
-                    # → set PYTHON / TORCH_INDEX in mlsc.conf (cu126 needs driver >= 525)
-$M setup            # venv on /vast/lnq/env + weights (basic partition, ~30-60 min)
+                    # → check TORCH_INDEX in mlsc.conf (cu126 needs driver >= 525)
+$M setup            # uv-managed CPython 3.11 under /vast/lnq/python, venv on
+                    # /vast/lnq/env, model weights (basic partition, ~30-60 min)
 ```
 
 ## Dry run and benchmark
@@ -124,7 +125,7 @@ functional groups with pydicom. Flags/tags end up in `series_index.csv`,
 |---|---|---|
 | `run_pipeline.sh` | login node | `sbatch` wrapper; reads `mlsc.conf` |
 | `probe.sbatch` | each partition | node facts before setup |
-| `setup-env.sbatch` | basic | venv + `lnq-segmenter download` |
+| `setup-env.sbatch` | basic | relocatable python (uv) + venv + `lnq-segmenter download` |
 | `stage_dicom.py` / `stage.sbatch` | basic (array/case) | DICOM → `ct.nrrd` + `geometry.json` |
 | `build_cohort.py` / `build-cohort.sbatch` | basic | manifests, cohort symlinks, `predict_tasks.tsv` |
 | `predict_batch.py` / `predict.sbatch` | GPU (array/(model,chunk)) | model loaded once per chunk; SEG + prob; per-volume JSONL |

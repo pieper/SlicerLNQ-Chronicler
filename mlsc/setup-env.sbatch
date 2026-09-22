@@ -7,15 +7,38 @@
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
 set -euo pipefail
-: "${ENV:?}" "${MODELS_CACHE:?}" "${NNUNET_BASE:?}" "${TORCH_INDEX:?}" "${LNQ_SEGMENTER_SPEC:?}" "${MODELS:?}"
-PY=${PYTHON:-python3}
+: "${ROOT:?}" "${ENV:?}" "${MODELS_CACHE:?}" "${NNUNET_BASE:?}" "${TORCH_INDEX:?}" "${LNQ_SEGMENTER_SPEC:?}" "${MODELS:?}"
+PY=${PYTHON:-uv:3.11}
 export TMPDIR=${TMPDIR:-/tmp}
 export PIP_CACHE_DIR="$TMPDIR/pip-cache"          # keep the home quota out of it
-echo "== $(date -u) host=$(hostname) python=$($PY --version 2>&1) env=$ENV"
+echo "== $(date -u) host=$(hostname) PYTHON=$PY env=$ENV"
 
-if [ ! -x "$ENV/bin/python" ]; then
-  "$PY" -m venv "$ENV"
-fi
+# The MLSC nodes are heterogeneous (Rocky 8 / Rocky 9 / Ubuntu 24.04 with
+# different system pythons and glibc), so a venv tied to /usr/bin/pythonX.Y
+# only runs on some partitions. Default: a relocatable CPython managed by uv
+# under $ROOT/python, which every node can execute. Set PYTHON=/path/to/python3
+# in mlsc.conf to use a system interpreter instead.
+case "$PY" in
+  uv:*)
+    ver=${PY#uv:}
+    UV="$ROOT/bin/uv"
+    export UV_PYTHON_INSTALL_DIR="$ROOT/python" UV_CACHE_DIR="$TMPDIR/uv-cache"
+    if [ ! -x "$UV" ]; then
+      echo "== installing uv → $ROOT/bin"
+      curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$ROOT/bin" UV_NO_MODIFY_PATH=1 sh
+    fi
+    "$UV" python install "$ver"
+    if [ ! -x "$ENV/bin/python" ]; then
+      "$UV" venv --seed --python "$ver" "$ENV"     # --seed: include pip for the steps below
+    fi
+    ;;
+  *)
+    if [ ! -x "$ENV/bin/python" ]; then
+      "$PY" -m venv "$ENV"
+    fi
+    ;;
+esac
+echo "== venv python: $("$ENV/bin/python" --version 2>&1) ($(readlink -f "$ENV/bin/python"))"
 "$ENV/bin/pip" install --upgrade pip wheel
 "$ENV/bin/pip" install --extra-index-url "$TORCH_INDEX" torch torchvision
 "$ENV/bin/pip" install nnunetv2 SimpleITK pydicom numpy matplotlib
