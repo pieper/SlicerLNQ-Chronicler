@@ -14,10 +14,14 @@ Rejected: non-CT modality, non-image SOP classes (dose reports, SR, secondary
 capture), ImageType LOCALIZER/SCOUT/TOPOGRAM, non-axial orientation (coronal /
 sagittal MPRs), fewer than --min-slices slices.
 
-Kept but flagged (in `flags`): duplicate slice positions, missing slices,
-irregular spacing, gantry tilt / sheared stacks, mixed rescale, multiple
-stacks in one series, multiple studies in one case. Volumes are written best
-effort (median z-spacing when irregular) unless --strict is given.
+Kept but flagged (in `flags`): duplicate slice positions, missing slices
+(filled by linear interpolation on the true grid; rejected as
+`incomplete_series` when more than --max-missing-frac of the positions are
+absent, e.g. an unfinished rclone copy), irregular spacing, gantry tilt /
+sheared stacks, mixed rescale, multiple stacks in one series, multiple
+studies in one case. Volumes are written best effort (median z-spacing when
+irregular) unless --strict is given. Re-running reconverts any volume whose
+source file count changed since it was staged.
 
 Kept and tagged (informational, in `tags`): spectral-derived series (VNC,
 iodine, monoenergetic, Z-effective), reconstruction kernel, matrix size,
@@ -312,10 +316,11 @@ def series_meta(ds):
 # --------------------------------------------------------------------------- classification
 
 def spectral_kind(meta):
-    text = " ".join([meta.get("series_description", ""), " ".join(meta.get("image_type", []))])
-    for kind, pattern in SPECTRAL_PATTERNS:
-        if pattern.search(text):
-            return kind
+    """Description first (what the tech named it), ImageType as fallback."""
+    for text in (meta.get("series_description", ""), " ".join(meta.get("image_type", []))):
+        for kind, pattern in SPECTRAL_PATTERNS:
+            if pattern.search(text):
+                return kind
     return ""
 
 
@@ -475,6 +480,8 @@ def analyze_stack(stack, meta, rel_tol=0.01, abs_tol=0.01):
                 missing += k - 1
             else:
                 unexplained += 1
+        info["n_missing"] = missing
+        info["n_expected"] = len(stack) + missing
         if missing:
             flags.append(f"missing_slices={missing}")
         if unexplained:
@@ -516,7 +523,7 @@ def _expected_geometry(stack, info):
         "origin": tuple(stack[0]["ipp"]),
         "spacing": (ps[1], ps[0], dz),      # sitk: (x=col, y=row, z)
         "direction": _sitk_direction(iop, normal),
-        "size": (stack[0]["cols"], stack[0]["rows"], len(stack)),
+        "size": (stack[0]["cols"], stack[0]["rows"], info.get("n_grid") or len(stack)),
     }
 
 
@@ -543,49 +550,71 @@ def read_stack_sitk(stack):
     return reader.Execute()
 
 
-def read_stack_numpy(stack):
+def read_stack_numpy(stack, grid=None):
     """Assemble a volume from pydicom pixel data; used for multi-frame
-    (Enhanced CT) objects and as a fallback for legacy series."""
+    (Enhanced CT) objects, for gap filling, and as a fallback for legacy
+    series.
+
+    grid=(z_spacing, n_grid): place each slice at its true index on a
+    regular grid starting at the first slice and fill missing indices by
+    linear interpolation between the nearest present neighbours. Without
+    grid, slices are simply stacked in order."""
     import numpy as np
     import pydicom
     import SimpleITK as sitk
+    rows, cols = stack[0]["rows"], stack[0]["cols"]
+    if grid:
+        dz, n = grid
+        normal, pos = _positions(stack)
+        idx = [int(round((p - pos[0]) / dz)) for p in pos]
+    else:
+        n = len(stack)
+        idx = list(range(n))
+    vol = np.zeros((n, rows, cols), dtype=np.float32)
+    present = np.zeros(n, dtype=bool)
     cache = {}
-    planes = []
-    for s in stack:
+    for s, i in zip(stack, idx):
         ds = cache.get(s["path"])
         if ds is None:
             ds = pydicom.dcmread(s["path"])
-            cache[s["path"]] = ds
-            if len(cache) > 2:  # keep memory bounded for legacy series
-                cache = {s["path"]: ds}
+            cache = {s["path"]: ds}          # one file resident at a time
         arr = ds.pixel_array
-        if s["frame"] is not None:
-            plane = arr[s["frame"]] if arr.ndim == 3 else arr
-        else:
-            plane = arr
-        plane = plane.astype(np.float32) * s["rescale_slope"] + s["rescale_intercept"]
-        planes.append(plane)
-    vol = np.stack(planes, axis=0)
+        plane = arr[s["frame"]] if (s["frame"] is not None and arr.ndim == 3) else arr
+        vol[i] = plane.astype(np.float32) * s["rescale_slope"] + s["rescale_intercept"]
+        present[i] = True
+    pres = np.flatnonzero(present)
+    for j in np.flatnonzero(~present):
+        lo = pres[pres < j].max()
+        hi = pres[pres > j].min()
+        w = (j - lo) / float(hi - lo)
+        vol[j] = (1.0 - w) * vol[lo] + w * vol[hi]
     vol = np.clip(np.rint(vol), -32768, 32767).astype(np.int16)
-    img = sitk.GetImageFromArray(vol)
-    return img
+    return sitk.GetImageFromArray(vol)
 
 
 def write_volume(stack, info, out_path, force_numpy=False):
     """Write the stack as int16 NRRD. Returns list of geometry flags."""
     import SimpleITK as sitk
+    grid = None
+    if info.get("n_missing"):
+        # Fill gaps on the true grid rather than packing slices together.
+        info["n_grid"] = info["n_expected"]
+        grid = (info["z_spacing"], info["n_expected"])
+        flags_extra = [f"interpolated_slices={info['n_missing']}"]
+    else:
+        flags_extra = []
     exp = _expected_geometry(stack, info)
-    flags = []
+    flags = list(flags_extra)
     img = None
     multiframe = any(s["frame"] is not None for s in stack)
-    if not multiframe and not force_numpy:
+    if not multiframe and not force_numpy and grid is None:
         try:
             img = read_stack_sitk(stack)
         except Exception as exc:  # noqa: BLE001
             log.warning("SimpleITK series read failed (%s); falling back to pydicom", exc)
             flags.append("sitk_read_failed")
     if img is None:
-        img = read_stack_numpy(stack)
+        img = read_stack_numpy(stack, grid=grid)
         img.SetOrigin(exp["origin"])
         img.SetSpacing(exp["spacing"])
         img.SetDirection(exp["direction"])
@@ -608,7 +637,7 @@ def write_volume(stack, info, out_path, force_numpy=False):
 
 # --------------------------------------------------------------------------- per-case driver
 
-def plan_case(case_id, series, min_slices):
+def plan_case(case_id, series, min_slices, max_missing_frac=0.25):
     """Turn scanned series into a list of planned volumes / rejections.
     Pure function of the headers (no pixel IO) so --dry-run can print it."""
     studies = sorted({(e["meta"]["study_date"], e["meta"]["study_time"], e["meta"]["study_uid"])
@@ -662,6 +691,14 @@ def plan_case(case_id, series, min_slices):
                     continue
                 sub, info, gflags = analyze_stack(sub, meta)
                 flags = dflags + gflags
+                n_missing = info.get("n_missing", 0)
+                if n_missing and n_missing / float(info["n_expected"]) > max_missing_frac:
+                    rows.append(dict(base_row, decision="rejected",
+                                     reasons=f"incomplete_series={len(sub)}/{info['n_expected']}",
+                                     flags=";".join(flags), tags=";".join(stack_tags),
+                                     volume_id="", series_dir="", n_slices=len(sub),
+                                     ct_path="", _stack=None))
+                    continue
                 suffix = ""
                 if len(stacks) > 1 or len(substacks) > 1:
                     suffix = f"_stk{produced + 1}"
@@ -701,10 +738,10 @@ def _fmt(v):
 
 
 def stage_case(case_id, case_dir, work, min_slices, dry_run=False, force=False,
-               strict=False):
+               strict=False, max_missing_frac=0.25):
     t0 = time.time()
     series, _ = scan_case(case_dir)
-    rows = plan_case(case_id, series, min_slices)
+    rows = plan_case(case_id, series, min_slices, max_missing_frac=max_missing_frac)
     case_out = os.path.join(work, case_id)
     if dry_run:
         print_plan(rows)
@@ -726,9 +763,13 @@ def stage_case(case_id, case_dir, work, min_slices, dry_run=False, force=False,
             log.info("%s: strict mode rejects (%s)", row["series_dir"], row["flags"])
             continue
         if os.path.isfile(ct_path) and os.path.isfile(geom_path) and not force:
-            log.info("%s: exists, skip", row["series_dir"])
-            row["staged_at"] = _json_load(geom_path).get("staged_at", "")
-            continue
+            prev = _json_load(geom_path)
+            if prev.get("n_source_frames") == len(stack):
+                log.info("%s: exists, skip", row["series_dir"])
+                row["staged_at"] = prev.get("staged_at", "")
+                continue
+            log.info("%s: source changed (%s → %d frames), reconverting",
+                     row["series_dir"], prev.get("n_source_frames"), len(stack))
         os.makedirs(vol_dir, exist_ok=True)
         t1 = time.time()
         try:
@@ -763,6 +804,7 @@ def stage_case(case_id, case_dir, work, min_slices, dry_run=False, force=False,
                          "protocol_name", "body_part", "gantry_tilt", "image_type")},
             "source_files": sorted({s["path"] for s in stack}),
             "n_source_frames": len(stack),
+            "n_missing_interpolated": info.get("n_missing", 0),
             "staged_at": row["staged_at"],
             "conversion_seconds": round(time.time() - t1, 1),
         }
@@ -818,6 +860,10 @@ def main(argv=None):
     ap.add_argument("--case-list", default=None,
                     help="Default: <work>/manifest/case_list.txt")
     ap.add_argument("--min-slices", type=int, default=20)
+    ap.add_argument("--max-missing-frac", type=float, default=0.25,
+                    help="Reject a series when more than this fraction of its slice positions "
+                         "is missing (incomplete copy). Smaller gaps are filled by linear "
+                         "interpolation and flagged.")
     ap.add_argument("--dry-run", action="store_true", help="Classify only; no conversion.")
     ap.add_argument("--force", action="store_true", help="Re-convert existing volumes.")
     ap.add_argument("--strict", action="store_true",
@@ -853,7 +899,8 @@ def main(argv=None):
         case_dir = dirs[args.case_index]
     case_id = os.path.basename(case_dir)
     rows = stage_case(case_id, case_dir, args.work, args.min_slices,
-                      dry_run=args.dry_run, force=args.force, strict=args.strict)
+                      dry_run=args.dry_run, force=args.force, strict=args.strict,
+                      max_missing_frac=args.max_missing_frac)
     return 0 if any(r["decision"] == "staged" for r in rows) or args.dry_run else 1
 
 

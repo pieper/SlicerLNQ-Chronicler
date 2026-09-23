@@ -71,12 +71,13 @@ def _plane(value):
 
 def write_series(root, series_number, desc, positions, iop=AXIAL, sop_class=CT_IMAGE,
                  image_type=("ORIGINAL", "PRIMARY", "AXIAL"), modality="CT",
-                 acquisition_numbers=None, spacing=(0.5, 0.5), thickness=1.0):
+                 acquisition_numbers=None, spacing=(0.5, 0.5), thickness=1.0,
+                 series_uid=None, first_index=0):
     """Write one legacy single-frame series; raw value = 1024 + 10*index."""
-    series_uid = generate_uid()
+    series_uid = series_uid or generate_uid()
     sdir = os.path.join(root, f"series{series_number}")
     os.makedirs(sdir, exist_ok=True)
-    for i, z in enumerate(positions):
+    for i, z in enumerate(positions, first_index):
         path = os.path.join(sdir, f"img{i:04d}.dcm")
         ds = _base_ds(path, sop_class, series_uid, series_number, desc, i + 1,
                       image_type=image_type, modality=modality)
@@ -149,6 +150,9 @@ def study(tmp_path_factory):
     write_series(case, 11, "Interleaved", z(30) + z(30),
                  acquisition_numbers=[1] * 30 + [2] * 30)
     write_series(case, 12, "PET", z(30), modality="PT")
+    write_series(case, 13, "Iodine map", z(30), image_type=("DERIVED", "SECONDARY", "VNC"))
+    # 70 of 100 positions present (30 % missing) → incomplete copy
+    write_series(case, 14, "Half copied", [float(i) for i in range(40)] + [float(i) for i in range(41, 100, 2)])
     # a stray non-DICOM file
     with open(os.path.join(case, "notes.txt"), "w") as f:
         f.write("not dicom\n")
@@ -174,6 +178,8 @@ def test_rejections(study):
     assert "sop_class=SecondaryCapture" in _row(study, 8)["reasons"]
     assert "too_few_slices=10" in _row(study, 9)["reasons"]
     assert "modality=PT" in _row(study, 12)["reasons"]
+    assert _row(study, 14)["reasons"] == "incomplete_series=70/100"
+    assert "missing_slices=30" in _row(study, 14)["flags"]
 
 
 def test_clean_axial_volume(study):
@@ -202,10 +208,19 @@ def test_duplicate_slice_flagged(study):
     assert r["n_slices"] == 29
 
 
-def test_missing_slices_flagged(study):
+def test_missing_slices_interpolated(study):
+    import SimpleITK as sitk
     r = _row(study, 5)
-    assert "missing_slices=3" in r["flags"]
+    assert "missing_slices=3" in r["flags"] and "interpolated_slices=3" in r["flags"]
     assert "irregular_spacing" not in r["flags"]
+    img = sitk.ReadImage(r["ct_path"])
+    assert img.GetSize() == (COLS, ROWS, 30)          # full grid, not packed
+    assert img.GetSpacing() == (0.5, 0.5, 1.0)
+    arr = sitk.GetArrayFromImage(img)
+    assert arr[9, 0, 0] == 90 and arr[13, 0, 0] == 100   # neighbours of the gap
+    assert all(90 < arr[k, 0, 0] < 100 for k in (10, 11, 12))
+    geom = json.load(open(os.path.join(os.path.dirname(r["ct_path"]), "geometry.json")))
+    assert geom["n_missing_interpolated"] == 3 and geom["size_xyz"][2] == 30
 
 
 def test_irregular_spacing_flagged(study):
@@ -231,6 +246,7 @@ def test_enhanced_multiframe(study):
 def test_spectral_tag(study):
     assert "spectral=vnc" in _row(study, 10)["tags"]
     assert _row(study, 10)["spectral"] == "vnc"
+    assert _row(study, 13)["spectral"] == "iodine"   # description beats ImageType
 
 
 def test_interleaved_split(study):
@@ -246,7 +262,7 @@ def test_series_csv_written(study):
         rows = list(csv.DictReader(f))
     assert set(rows[0].keys()) == set(stage_dicom.SERIES_COLUMNS)
     staged = [r for r in rows if r["decision"] == "staged"]
-    assert len(staged) == 8  # 2,4,5,6,7,10,11a,11b
+    assert len(staged) == 9  # 2,4,5,6,7,10,11a,11b,13
     text = open(path).read()
     assert "SHOULD" not in text and "MRN" not in text
 
@@ -268,3 +284,27 @@ def test_sanitize():
     assert stage_dicom.sanitize("Body 1.0  Br40 / axial") == "Body_1-0_Br40_axial"
     assert stage_dicom.sanitize("") == "series"
     assert stage_dicom.sanitize("x" * 100).__len__() <= 48
+
+
+def test_reconvert_when_source_grows(tmp_path):
+    """Simulates an rclone copy finishing after the first staging pass."""
+    import SimpleITK as sitk
+    case = tmp_path / "E00000099"
+    case.mkdir()
+    uid = generate_uid()
+    write_series(str(case), 1, "Body", [float(i) for i in range(0, 40, 2)] + [41.0],
+                 series_uid=uid)                       # every other slice → 50 % missing
+    rows = stage_dicom.stage_case("E00000099", str(case), str(tmp_path / "w"), min_slices=20)
+    assert rows[0]["decision"] == "rejected" and rows[0]["reasons"].startswith("incomplete_series")
+    write_series(str(case), 1, "Body", [float(i) for i in range(1, 40, 2)],
+                 series_uid=uid, first_index=100)      # the rest arrives
+    rows = stage_dicom.stage_case("E00000099", str(case), str(tmp_path / "w"), min_slices=20)
+    assert rows[0]["decision"] == "staged" and rows[0]["flags"] == ""
+    ct = rows[0]["ct_path"]
+    assert sitk.ReadImage(ct).GetSize()[2] == 42
+    geom_path = os.path.join(os.path.dirname(ct), "geometry.json")
+    assert json.load(open(geom_path))["n_source_frames"] == 42
+    # third pass with unchanged source is a no-op
+    mtime = os.path.getmtime(ct)
+    stage_dicom.stage_case("E00000099", str(case), str(tmp_path / "w"), min_slices=20)
+    assert os.path.getmtime(ct) == mtime

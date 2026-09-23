@@ -108,9 +108,13 @@ Per case: read every header, group by series, then
   SR, secondary capture); `ImageType` LOCALIZER/SCOUT/TOPOGRAM; non-axial
   orientation (coronal/sagittal MPRs); fewer than `MIN_SLICES` (20) slices.
 * **flag** (still converted, best effort): `duplicate_positions`,
-  `missing_slices`, `irregular_spacing` (median spacing used),
-  `gantry_tilt`, `sheared_stack`, `mixed_rescale`, `split_by_acquisition_number`,
-  `multi_stack`, `reader_geometry_adjusted`. `--strict` rejects flagged series.
+  `missing_slices` + `interpolated_slices` (gaps filled by linear interpolation
+  on the true grid; more than `MAX_MISSING_FRAC` missing → rejected as
+  `incomplete_series`, typically an unfinished rclone copy — re-run `stage`
+  once the copy completes and the volume is reconverted automatically),
+  `irregular_spacing` (median spacing used), `gantry_tilt`, `sheared_stack`,
+  `mixed_rescale`, `split_by_acquisition_number`, `multi_stack`,
+  `reader_geometry_adjusted`. `--strict` rejects flagged series.
 * **tag** (informational): `spectral=vnc|iodine|monoenergetic|zeff|spectral`,
   `kernel=Br40`, `multi_study`, `derived_secondary`.
 
