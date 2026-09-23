@@ -151,7 +151,7 @@ def study(tmp_path_factory):
                  acquisition_numbers=[1] * 30 + [2] * 30)
     write_series(case, 12, "PET", z(30), modality="PT")
     write_series(case, 13, "Iodine map", z(30), image_type=("DERIVED", "SECONDARY", "VNC"))
-    # 70 of 100 positions present (30 % missing) → incomplete copy
+    # 70 of 100 positions present (30 % missing): kept + interpolated by default
     write_series(case, 14, "Half copied", [float(i) for i in range(40)] + [float(i) for i in range(41, 100, 2)])
     # a stray non-DICOM file
     with open(os.path.join(case, "notes.txt"), "w") as f:
@@ -178,8 +178,9 @@ def test_rejections(study):
     assert "sop_class=SecondaryCapture" in _row(study, 8)["reasons"]
     assert "too_few_slices=10" in _row(study, 9)["reasons"]
     assert "modality=PT" in _row(study, 12)["reasons"]
-    assert _row(study, 14)["reasons"] == "incomplete_series=70/100"
-    assert "missing_slices=30" in _row(study, 14)["flags"]
+    r14 = _row(study, 14)
+    assert r14["decision"] == "staged"
+    assert "missing_slices=30" in r14["flags"] and "interpolated_slices=30" in r14["flags"]
 
 
 def test_clean_axial_volume(study):
@@ -262,7 +263,7 @@ def test_series_csv_written(study):
         rows = list(csv.DictReader(f))
     assert set(rows[0].keys()) == set(stage_dicom.SERIES_COLUMNS)
     staged = [r for r in rows if r["decision"] == "staged"]
-    assert len(staged) == 9  # 2,4,5,6,7,10,11a,11b,13
+    assert len(staged) == 10  # 2,4,5,6,7,10,11a,11b,13,14
     text = open(path).read()
     assert "SHOULD" not in text and "MRN" not in text
 
@@ -287,23 +288,29 @@ def test_sanitize():
 
 
 def test_reconvert_when_source_grows(tmp_path):
-    """Simulates an rclone copy finishing after the first staging pass."""
+    """Simulates a copy finishing after the first staging pass. Note the
+    first pass must have *irregular* gaps: dropping every other slice looks
+    exactly like a 2 mm series and is (correctly) not flagged."""
     import SimpleITK as sitk
     case = tmp_path / "E00000099"
     case.mkdir()
     uid = generate_uid()
-    write_series(str(case), 1, "Body", [float(i) for i in range(0, 40, 2)] + [41.0],
-                 series_uid=uid)                       # every other slice → 50 % missing
+    first = [float(i) for i in range(20)] + [float(i) for i in range(20, 60, 3)]   # 34 of 60
+    write_series(str(case), 1, "Body", first, series_uid=uid)
+    rows = stage_dicom.stage_case("E00000099", str(case), str(tmp_path / "w"), min_slices=20,
+                                  max_missing_frac=0.25)
+    assert rows[0]["decision"] == "rejected" and rows[0]["reasons"] == "incomplete_series=34/60"
     rows = stage_dicom.stage_case("E00000099", str(case), str(tmp_path / "w"), min_slices=20)
-    assert rows[0]["decision"] == "rejected" and rows[0]["reasons"].startswith("incomplete_series")
-    write_series(str(case), 1, "Body", [float(i) for i in range(1, 40, 2)],
-                 series_uid=uid, first_index=100)      # the rest arrives
+    assert rows[0]["decision"] == "staged" and "interpolated_slices=26" in rows[0]["flags"]
+    ct = rows[0]["ct_path"]
+    assert sitk.ReadImage(ct).GetSize()[2] == 60
+    rest = [float(i) for i in range(20, 60) if (i - 20) % 3 != 0]                   # the other 26
+    write_series(str(case), 1, "Body", rest, series_uid=uid, first_index=100)
     rows = stage_dicom.stage_case("E00000099", str(case), str(tmp_path / "w"), min_slices=20)
     assert rows[0]["decision"] == "staged" and rows[0]["flags"] == ""
-    ct = rows[0]["ct_path"]
-    assert sitk.ReadImage(ct).GetSize()[2] == 42
+    assert sitk.ReadImage(ct).GetSize()[2] == 60
     geom_path = os.path.join(os.path.dirname(ct), "geometry.json")
-    assert json.load(open(geom_path))["n_source_frames"] == 42
+    assert json.load(open(geom_path))["n_source_frames"] == 60
     # third pass with unchanged source is a no-op
     mtime = os.path.getmtime(ct)
     stage_dicom.stage_case("E00000099", str(case), str(tmp_path / "w"), min_slices=20)

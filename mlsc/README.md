@@ -109,9 +109,10 @@ Per case: read every header, group by series, then
   orientation (coronal/sagittal MPRs); fewer than `MIN_SLICES` (20) slices.
 * **flag** (still converted, best effort): `duplicate_positions`,
   `missing_slices` + `interpolated_slices` (gaps filled by linear interpolation
-  on the true grid; more than `MAX_MISSING_FRAC` missing → rejected as
-  `incomplete_series`, typically an unfinished rclone copy — re-run `stage`
-  once the copy completes and the volume is reconverted automatically),
+  on the true grid, as the syngo.via exports are missing slices we cannot
+  recover; set `MAX_MISSING_FRAC` below 1.0 to reject sparse series as
+  `incomplete_series` instead; if more files arrive later, re-running `stage`
+  reconverts the volume automatically),
   `irregular_spacing` (median spacing used), `gantry_tilt`, `sheared_stack`,
   `mixed_rescale`, `split_by_acquisition_number`, `multi_stack`,
   `reader_geometry_adjusted`. `--strict` rejects flagged series.

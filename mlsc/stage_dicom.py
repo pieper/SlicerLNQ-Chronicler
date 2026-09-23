@@ -15,13 +15,15 @@ capture), ImageType LOCALIZER/SCOUT/TOPOGRAM, non-axial orientation (coronal /
 sagittal MPRs), fewer than --min-slices slices.
 
 Kept but flagged (in `flags`): duplicate slice positions, missing slices
-(filled by linear interpolation on the true grid; rejected as
-`incomplete_series` when more than --max-missing-frac of the positions are
-absent, e.g. an unfinished rclone copy), irregular spacing, gantry tilt /
-sheared stacks, mixed rescale, multiple stacks in one series, multiple
-studies in one case. Volumes are written best effort (median z-spacing when
-irregular) unless --strict is given. Re-running reconverts any volume whose
-source file count changed since it was staged.
+(filled by linear interpolation on the true grid and counted in
+`interpolated_slices=N`; optionally rejected as `incomplete_series` via
+--max-missing-frac), irregular spacing, gantry tilt / sheared stacks, mixed
+rescale, multiple stacks in one series, multiple studies in one case.
+Volumes are written best effort (median z-spacing when irregular) unless
+--strict is given. Re-running reconverts any volume whose source file count
+changed since it was staged. Note that a series uniformly thinned (every
+other slice absent) is indistinguishable from a coarser acquisition and is
+not flagged.
 
 Kept and tagged (informational, in `tags`): spectral-derived series (VNC,
 iodine, monoenergetic, Z-effective), reconstruction kernel, matrix size,
@@ -637,7 +639,7 @@ def write_volume(stack, info, out_path, force_numpy=False):
 
 # --------------------------------------------------------------------------- per-case driver
 
-def plan_case(case_id, series, min_slices, max_missing_frac=0.25):
+def plan_case(case_id, series, min_slices, max_missing_frac=1.0):
     """Turn scanned series into a list of planned volumes / rejections.
     Pure function of the headers (no pixel IO) so --dry-run can print it."""
     studies = sorted({(e["meta"]["study_date"], e["meta"]["study_time"], e["meta"]["study_uid"])
@@ -738,7 +740,7 @@ def _fmt(v):
 
 
 def stage_case(case_id, case_dir, work, min_slices, dry_run=False, force=False,
-               strict=False, max_missing_frac=0.25):
+               strict=False, max_missing_frac=1.0):
     t0 = time.time()
     series, _ = scan_case(case_dir)
     rows = plan_case(case_id, series, min_slices, max_missing_frac=max_missing_frac)
@@ -860,10 +862,11 @@ def main(argv=None):
     ap.add_argument("--case-list", default=None,
                     help="Default: <work>/manifest/case_list.txt")
     ap.add_argument("--min-slices", type=int, default=20)
-    ap.add_argument("--max-missing-frac", type=float, default=0.25,
+    ap.add_argument("--max-missing-frac", type=float, default=1.0,
                     help="Reject a series when more than this fraction of its slice positions "
-                         "is missing (incomplete copy). Smaller gaps are filled by linear "
-                         "interpolation and flagged.")
+                         "is missing. Default 1.0 = never reject: gaps are filled by linear "
+                         "interpolation on the true grid and flagged (the PCCT syngo.via "
+                         "exports are missing slices we cannot recover).")
     ap.add_argument("--dry-run", action="store_true", help="Classify only; no conversion.")
     ap.add_argument("--force", action="store_true", help="Re-convert existing volumes.")
     ap.add_argument("--strict", action="store_true",

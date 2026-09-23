@@ -49,7 +49,8 @@ STAGE_MEM=24G
 STAGE_TIME=0-02:00:00
 STAGE_CONCURRENCY=20                    # %N on the staging job array
 MIN_SLICES=20
-MAX_MISSING_FRAC=0.25                   # reject a series missing more than this fraction of slices
+MAX_MISSING_FRAC=1.0                    # 1.0 = never reject for missing slices (gaps are
+                                        # interpolated + flagged); lower to reject sparse series
 
 # ---- inference (GPU) ------------------------------------------------------------
 PREDICT_CPUS=3
