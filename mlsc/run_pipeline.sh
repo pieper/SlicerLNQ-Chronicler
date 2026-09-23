@@ -15,7 +15,7 @@
 #   predict [--then-qc]   GPU array over predict_tasks.tsv (needs build first)
 #   qc [--after JOB]      qc.csv + PNGs per model
 #   all [--limit N]       stage → build → (build submits predict → qc)
-#   status                queue + on-disk progress
+#   status                queue, on-disk counts, failures, seconds/volume, ETA
 #
 # Only sbatch/squeue/sacct and a directory walk run here; everything else is a job.
 set -euo pipefail
@@ -180,7 +180,7 @@ cmd_all() {
 }
 
 cmd_status() {
-  echo "== queue"; squeue -u "$USER" -o "%.10i %.14j %.9P %.8T %.10M %.6D %R" 2>/dev/null || true
+  echo "== queue"; squeue -u "$USER" -o "%.16i %.14j %.9P %.8T %.10M %.6D %R" 2>/dev/null || true
   echo "== recent jobs"; sacct -u "$USER" -S "$(date -d '-2 days' +%F 2>/dev/null || date -v-2d +%F)" \
     --format=JobID,JobName%16,Partition,State,Elapsed,MaxRSS -P 2>/dev/null | grep -v '\.batch\|\.extern' | tail -30 || true
   echo "== on disk ($WORK)"
@@ -193,7 +193,11 @@ cmd_status() {
       "$(ls "$WORK"/E????????/*/"$m"-prob.nrrd 2>/dev/null | wc -l | tr -d ' ')" \
       "$(( $(count_lines "$WORK/cohort/qc/$m/qc.csv") > 0 ? $(count_lines "$WORK/cohort/qc/$m/qc.csv") - 1 : 0 ))"
   done
-  echo "   failed volumes: $(cat "$WORK"/logs/predict-*.jsonl 2>/dev/null | grep -c '"status": "failed"' || true)"
+  local running
+  running=$(squeue -u "$USER" -h -t R -o "%j" 2>/dev/null | grep -c '^lnq-predict' || true)
+  echo "== progress"
+  "$PY" "$MLSC_DIR/progress.py" --work "$WORK" --models "$MODELS" --running "${running:-0}" \
+    --concurrency "${GPU_CONCURRENCY:-6}"
 }
 
 case "$CMD" in
