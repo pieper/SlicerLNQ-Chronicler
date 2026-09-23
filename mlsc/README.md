@@ -131,6 +131,7 @@ functional groups with pydicom. Flags/tags end up in `series_index.csv`,
 | `run_pipeline.sh` | login node | `sbatch` wrapper; reads `mlsc.conf` |
 | `probe.sbatch` | each partition | node facts before setup |
 | `setup-env.sbatch` | basic | relocatable python (uv) + venv + `lnq-segmenter download` |
+| `inventory.py` / `inventory.sbatch` | basic | census of the input: cases, patients, studies, series, volumes |
 | `stage_dicom.py` / `stage.sbatch` | basic (array/case) | DICOM → `ct.nrrd` + `geometry.json` |
 | `build_cohort.py` / `build-cohort.sbatch` | basic | manifests, cohort symlinks, `predict_tasks.tsv` |
 | `predict_batch.py` / `predict.sbatch` | GPU (array/(model,chunk)) | model loaded once per chunk; SEG + prob; per-volume JSONL |

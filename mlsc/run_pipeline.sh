@@ -6,6 +6,7 @@
 #   probe                 10-min probe job on every partition in $BENCH_PARTITIONS + $CPU_PARTITION
 #   setup                 venv + model weights on the basic partition
 #   list-cases            write manifest/case_list.txt (directory walk only; fine on the login node)
+#   inventory             header-only census: cases, patients, studies, series, candidate volumes
 #   stage [--limit N] [--force] [--strict]
 #                         DICOM → NRRD, one array task per case
 #   build [--after JOB]   manifests + cohort symlinks + predict_tasks.tsv
@@ -75,6 +76,11 @@ cmd_setup() {
 
 cmd_list_cases() {
   "$PY" "$MLSC_DIR/stage_dicom.py" --input "$INPUT" --work "$WORK" --list-cases
+}
+
+cmd_inventory() {
+  submit -p "$CPU_PARTITION" --output "$WORK/logs/inventory-%j.out" -- "$MLSC_DIR/inventory.sbatch"
+  echo "result: $WORK/logs/inventory-<jobid>.out and $WORK/manifest/inventory.csv" >&2
 }
 
 cmd_stage() {
@@ -194,6 +200,7 @@ case "$CMD" in
   probe) cmd_probe "$@";;
   setup) cmd_setup "$@";;
   list-cases) cmd_list_cases "$@";;
+  inventory) cmd_inventory "$@";;
   stage) cmd_stage "$@";;
   build) cmd_build "$@";;
   bench) cmd_bench "$@";;
