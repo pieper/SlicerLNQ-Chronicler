@@ -114,3 +114,21 @@ def test_qc_extras(work, capsys):
     assert rows[0]["series_description"].startswith("Body") and rows[0]["case"] == "E00000001"
     assert rows[0]["pred_volume_mL_p0.5"] == "1.5"
     assert rows[-1]["series_description"] == ""
+
+
+def test_refresh_links_after_moving_tree(work, tmp_path):
+    """Copy of the real files elsewhere (like a laptop pull) → links rebuilt there."""
+    import shutil
+    dest = str(tmp_path / "laptop" / "pdac-processing")
+    shutil.copytree(work, dest, ignore=shutil.ignore_patterns("nrrd", "predictions", "chunks"))
+    assert not os.path.isdir(os.path.join(dest, "cohort", "nrrd"))
+    assert build_cohort.main(["--work", dest, "--models", MODELS, "--refresh-links"]) == 0
+    vols = _read(os.path.join(dest, "manifest", "volumes.csv"))
+    assert vols and all(v["ct_path"].startswith(dest) for v in vols)
+    for v in vols:
+        link = os.path.join(dest, "cohort", "nrrd", f"{v['volume_id']}_0000.nrrd")
+        assert os.path.islink(link) and os.path.isfile(link)
+        assert os.path.realpath(link).startswith(os.path.realpath(dest))
+    # the fake seg/prob made earlier for vols[0] were copied too → linked
+    seg_link, _ = build_cohort.cohort_link_paths(dest, vols[0]["volume_id"], "mediastinal-v1")
+    assert os.path.islink(seg_link) and os.path.isfile(seg_link)

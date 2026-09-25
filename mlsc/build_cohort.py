@@ -20,6 +20,11 @@ Reads every <work>/E########/series.csv that stage_dicom.py wrote and:
 
 Cheap (headers + symlinks only), but run it as a job anyway to stay off the
 login node when the cohort is large.
+
+Portable: ct paths are re-derived from <work>/<case>/<series_dir>/, so after
+copying the real files (E*/ , manifest/, cohort/qc/) elsewhere,
+`build_cohort.py --work <copy> --models ... --refresh-links` recreates the
+cohort/nrrd + cohort/predictions symlinks there. Standard library only.
 """
 from __future__ import annotations
 
@@ -130,6 +135,14 @@ def main(argv=None):
     models = [m for m in args.models.replace(",", " ").split() if m]
     manifest = os.path.join(args.work, "manifest")
     rows = read_series_rows(args.work)
+    # The recorded ct_path is absolute on the machine that staged the volume.
+    # Re-derive it from <work>/<case>/<series_dir>/ct.nrrd so a copy of the
+    # tree (e.g. pulled to a laptop) can rebuild the cohort view in place.
+    for r in rows:
+        if r.get("decision") == "staged" and r.get("series_dir"):
+            local = os.path.join(args.work, r["case_id"], r["series_dir"], "ct.nrrd")
+            if os.path.isfile(local):
+                r["ct_path"] = local
     write_csv(os.path.join(manifest, "series_index.csv"), rows, SERIES_COLUMNS)
 
     volumes = [r for r in rows if r["decision"] == "staged" and os.path.isfile(r.get("ct_path", ""))]

@@ -16,9 +16,15 @@ the login node.
 **Data stays on `/vast/lnq`.** These are institutional studies (possible PHI,
 faces). Nothing here uploads anything; manifests and logs contain only the
 `E########` case id, series number/description/UID, geometry and scanner
-settings. NRRD files carry no DICOM tags. If you copy `cohort/` to Dropbox
-(MGB-approved for PHI) remember it is a tree of **symlinks**: use
-`rclone copy --copy-links` or `cp -rL`.
+settings. NRRD files carry no DICOM tags.
+
+**Copying the results elsewhere** (Dropbox is MGB-approved for PHI): the real
+files are `E*/`, `manifest/` and `cohort/qc/`; `cohort/nrrd/` and
+`cohort/predictions/` are symlinks. Copy the real files with
+`--exclude 'cohort/nrrd/**' --exclude 'cohort/predictions/**' --skip-links`,
+then on the destination run
+`build_cohort.py --work <dest> --models "<models>" --refresh-links`
+(standard library only) to recreate the symlink view for LNQReview.
 
 ## Layout on /vast/lnq
 
