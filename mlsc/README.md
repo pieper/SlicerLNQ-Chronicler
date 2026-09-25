@@ -137,6 +137,30 @@ syntaxes OK); Enhanced multi-frame CT is assembled from the per-frame
 functional groups with pydicom. Flags/tags end up in `series_index.csv`,
 `geometry.json`, and (via `qc_extras.py`) as extra columns in each `qc.csv`.
 
+## PDAC review dashboard (`pdac_stats.py` + `PDACReview/`)
+
+A standalone Slicer module for looking at the PCCT test cohort once the tree
+is on a local disk (e.g. `/Volumes/12T/PHI/PDAC`). Not part of the LNQ
+modules.
+
+1. Slicer → Edit → Application Settings → Modules → Additional module paths →
+   add `<repo>/mlsc/PDACReview`, restart. The module is under **LNQ → PDAC Review**.
+2. Set *Data root* to the tree, click **Compute stats** (runs `pdac_stats.py`
+   in-process with Slicer's SimpleITK; per-volume results are cached next to
+   each `ct.nrrd`, so re-runs only touch new SEGs). Or from a shell with any
+   Python that has SimpleITK + numpy: `pdac_stats.py --root /Volumes/12T/PHI/PDAC`.
+3. **Open dashboard**: overview = per-study median segmented volume and node
+   count per model across that study's series (min–max, CV in tooltips and
+   table); click a study for the per-series view with the agreement table and
+   node lists; **Load** opens the series in Slicer (CT + one segmentation per
+   model, optional probability overlay). The first Load asks "Allow Python
+   execution?" — answer Allow with *don't show again*.
+
+Outputs under `<root>/manifest/`: `pdac_stats.json` (dashboard data),
+`pdac_stats.csv` (one row per volume × model), `pdac_nodes.csv` (one row per
+connected component ≥ min node size, with volume, short/long axis, centroid).
+Patient index and day offsets come from `inventory.csv` when present.
+
 ## Files
 
 | file | runs on | purpose |
@@ -151,6 +175,7 @@ functional groups with pydicom. Flags/tags end up in `series_index.csv`,
 | `bench.sbatch` / `bench_report.py` | GPU partitions | pick the lightest partition that fits |
 | `qc.sbatch` (+ `../bin/idc-batch-qc.py`, `qc_extras.py`) | basic | `qc.csv` + PNGs per model |
 | `sync_cases.py` | Martinos (basic) / laptop | case-by-case rclone push/pull with completion table + ETA |
+| `pdac_stats.py` / `PDACReview/PDACReview.py` | laptop (Slicer) | PDAC cohort segment statistics + ECharts dashboard module |
 | `tests/` | laptop | synthetic-DICOM tests: `python -m pytest mlsc/tests -q` |
 
 `predict_batch.py` reuses `lnq_segmenter.registry` / `cache` /
