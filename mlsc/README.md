@@ -26,15 +26,12 @@ complete with an ETA, and only ever copies the real files (`E*/`,
 `cohort/nrrd` + `cohort/predictions` symlink view after every case, so the
 first cases can be opened in LNQReview while the rest are still arriving:
 
-    # Martinos → Dropbox (as a basic-partition job)
-    sbatch -A lnqmlsc -p basic --mem 4G --time 1-00:00:00 --job-name sync-push \
-      --output /vast/lnq/pdac-processing/logs/sync-push-%j.out \
-      --wrap "python3 /vast/lnq/SlicerLNQ-Chronicler/mlsc/sync_cases.py \
-              --work /vast/lnq/pdac-processing --remote dropbox:PDAC --push"
-    # Dropbox → laptop (system python3 + rclone)
-    sync_cases.py --work /Volumes/<enc>/pdac-processing --remote dropbox:PDAC --pull
-    # what is complete so far
-    sync_cases.py --work ... --remote dropbox:PDAC --push --status
+    # Martinos → Dropbox (basic-partition job; job id saved to manifest/sync-push.jobid)
+    run_pipeline.sh push --remote dropbox:PDAC
+    run_pipeline.sh sync-log                      # follow it
+    run_pipeline.sh sync-status --remote dropbox:PDAC
+    # Dropbox → laptop (system python3 >= 3.6 + rclone)
+    python3 mlsc/sync_cases.py --work /Volumes/<enc>/pdac-processing --remote dropbox:PDAC --pull
 
 ## Layout on /vast/lnq
 
