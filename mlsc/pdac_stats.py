@@ -167,8 +167,14 @@ def volume_record(root, vrow, models, min_node_ml, force, patients, qc_rows):
                            ("pred_volume_mL_p0.5", "pred_volume_mL_p0.001", "prob_max", "prob_p99")}
     phase, phase_s = parse_phase(vrow["series_description"])
     pinfo = patients.get(vrow["case_id"], {})
+    study_index = int(vrow.get("study_index") or 1)
     return {
         "volume_id": vrow["volume_id"], "case_id": vrow["case_id"],
+        "study_index": study_index,
+        # A case directory can hold more than one study (stage_dicom tags
+        # them multi_study and prefixes series dirs with S<n>_); keep them apart.
+        "study_id": vrow["case_id"] if study_index == 1 and not vrow["series_dir"].split("_", 1)[1].startswith("S1_")
+                    else f"{vrow['case_id']}/S{study_index}",
         "patient": pinfo.get("patient", vrow["case_id"]),
         "day": pinfo.get("day", 0),
         "series_number": int(vrow["series_number"] or 0),
@@ -194,8 +200,9 @@ def cv(values):
     return round(statistics.pstdev(values) / mean, 3) if mean else 0.0
 
 
-def study_summary(case_id, vols, models):
-    out = {"case_id": case_id, "patient": vols[0]["patient"], "day": vols[0]["day"],
+def study_summary(study_id, vols, models):
+    out = {"study_id": study_id, "case_id": vols[0]["case_id"], "study_index": vols[0]["study_index"],
+           "patient": vols[0]["patient"], "day": vols[0]["day"],
            "n_series": len(vols), "models": {}}
     for m in models:
         mls = [v["models"][m]["total_ml"] for v in vols if m in v["models"]]
@@ -237,13 +244,13 @@ def compute(root, models=None, min_node_ml=DEFAULT_MIN_NODE_ML, force=False, lim
             records.append(volume_record(root, vrow, models, min_node_ml, force, patients, qc_rows))
         except Exception as exc:  # noqa: BLE001 — one bad volume shouldn't stop the report
             print(f"WARN {vrow['volume_id']}: {type(exc).__name__}: {exc}", file=sys.stderr)
-    records.sort(key=lambda r: (r["patient"], r["day"], r["case_id"], r["series_number"]))
+    records.sort(key=lambda r: (r["patient"], r["day"], r["study_id"], r["series_number"]))
 
-    by_case = {}
+    by_study = {}
     for r in records:
-        by_case.setdefault(r["case_id"], []).append(r)
-    studies = [study_summary(c, v, models) for c, v in by_case.items()]
-    studies.sort(key=lambda s: (s["patient"], s["day"], s["case_id"]))
+        by_study.setdefault(r["study_id"], []).append(r)
+    studies = [study_summary(sid, v, models) for sid, v in by_study.items()]
+    studies.sort(key=lambda s: (s["patient"], s["day"], s["study_id"]))
 
     result = {"generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
               "root": root, "models": models, "min_node_ml": min_node_ml,
@@ -263,7 +270,7 @@ def write_outputs(root, result):
         json.dump(result, f, indent=1)
     os.replace(path + ".partial", path)
 
-    cols = ["patient", "day", "case_id", "volume_id", "series_number", "series_description", "phase",
+    cols = ["patient", "day", "case_id", "study_id", "volume_id", "series_number", "series_description", "phase",
             "spectral", "kernel", "slice_thickness_mm", "n_slices", "missing_frac", "flags", "model",
             "total_ml", "n_nodes", "n_specks", "nodes_ml", "largest_ml",
             "qc_pred_volume_mL_p0.001", "qc_prob_max"]
@@ -273,7 +280,7 @@ def write_outputs(root, result):
         for r in result["volumes"]:
             for m, e in r["models"].items():
                 q = e.get("qc", {})
-                wr.writerow([r["patient"], r["day"], r["case_id"], r["volume_id"], r["series_number"],
+                wr.writerow([r["patient"], r["day"], r["case_id"], r["study_id"], r["volume_id"], r["series_number"],
                              r["series_description"], r["phase"], r["spectral"], r["kernel"],
                              r["slice_thickness_mm"], r["n_slices"], r["missing_frac"], r["flags"], m,
                              e["total_ml"], e["n_nodes"], e["n_specks"], e["nodes_ml"], e["largest_ml"],

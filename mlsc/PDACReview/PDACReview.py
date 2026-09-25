@@ -338,7 +338,7 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
 
 def _slim_volume(v):
     """Only what the page needs (keeps the embedded JSON small)."""
-    out = {k: v.get(k) for k in ("volume_id", "case_id", "patient", "day", "series_number",
+    out = {k: v.get(k) for k in ("volume_id", "case_id", "study_id", "patient", "day", "series_number",
                                  "series_description", "phase", "phase_seconds", "spectral",
                                  "kernel", "slice_thickness_mm", "n_slices", "missing_frac", "flags")}
     out["models"] = {}
@@ -423,8 +423,8 @@ function phaseSec(p) { const v = D.volumes.find(v => (v.phase || "?") === p); re
 function seriesLabel(v) {
   return `#${v.series_number} ${v.phase || ""} ${v.spectral === "monoenergetic" ? (v.series_description.match(/\d+\s*keV/) || ["keV"])[0] : v.spectral} ${v.slice_thickness_mm}mm`;
 }
-function volumesOf(caseId) {
-  return D.volumes.filter(v => v.case_id === caseId && state.phases.has(v.phase || "?") &&
+function volumesOf(studyId) {
+  return D.volumes.filter(v => (v.study_id || v.case_id) === studyId && state.phases.has(v.phase || "?") &&
     state.spectral.has(v.spectral) && state.thick.has(v.slice_thickness_mm) && v.missing_frac <= state.maxMissing)
     .sort((a,b) => a.series_number - b.series_number);
 }
@@ -452,10 +452,10 @@ function renderFilters() {
 }
 
 function studyRows() {
-  const cases = [...new Set(D.volumes.map(v => v.case_id))];
-  const rows = cases.map(c => {
+  const studies = [...new Set(D.volumes.map(v => v.study_id || v.case_id))];
+  const rows = studies.map(c => {
     const vols = volumesOf(c); if (!vols.length) return null;
-    const v0 = D.volumes.find(v => v.case_id === c);
+    const v0 = D.volumes.find(v => (v.study_id || v.case_id) === c);
     const r = { case_id: c, patient: v0.patient, day: v0.day, n: vols.length, models: {} };
     for (const m of activeModels()) {
       const ml = vols.filter(v => v.models[m]).map(v => v.models[m].total_ml);
@@ -511,7 +511,7 @@ function openStudy(caseId) { state.view = "study"; state.study = caseId; render(
 
 function renderStudy() {
   const vols = volumesOf(state.study);
-  const v0 = D.volumes.find(v => v.case_id === state.study);
+  const v0 = D.volumes.find(v => (v.study_id || v.case_id) === state.study);
   document.getElementById("crumb").innerHTML = `<span class="back" id="back">← overview</span> &nbsp; <b>${v0.patient}</b> day ${v0.day} · ${state.study}`;
   document.getElementById("back").addEventListener("click", () => { state.view = "overview"; render(); });
   const main = document.getElementById("main");
