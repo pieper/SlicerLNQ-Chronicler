@@ -14,8 +14,18 @@ What it shows (Apache ECharts inside a qSlicerWebWidget):
     count per model, the series' phase / spectral kind / thickness / fraction
     of interpolated slices, the per-model agreement across series (CV, range),
     and per-series node lists. "Load" opens the series in this Slicer: CT +
-    one segmentation per model (registry colors) + optionally the probability
-    maps as an Inferno overlay.
+    one segmentation per model (registry colors) + one probability map.
+  * Geometry issues — every series whose staging flagged a geometry problem
+    (missing / interpolated slices, irregular spacing, …), with Load buttons
+    and a Copy button; also written to manifest/geometry_issues.csv.
+
+Probability review (module panel, LNQReview-style): a combo box picks which
+model's probability map is shown (default: the model with the largest
+segmentation in that series; only one map is in memory at a time) and a
+log-scaled slider sets the threshold — voxels above it are colored Inferno in
+the slice views and a thin iso-band at the threshold is volume-rendered in
+3D, both updating live. Works even for series where nothing was segmented,
+so residual probability is visible.
 
 Data comes from <root>/manifest/pdac_stats.json, produced by
 <repo>/mlsc/pdac_stats.py; the "Compute stats" button runs it in-process
@@ -23,6 +33,7 @@ Data comes from <root>/manifest/pdac_stats.json, produced by
 """
 import json
 import logging
+import math
 import os
 import sys
 
@@ -47,6 +58,22 @@ MODEL_COLORS = {
 MODEL_SHORT = {"mediastinal-v1": "mediastinal", "abdominopelvic-v1": "abd/pelvic",
                "axillary-v1": "axillary", "inguinal-v1": "inguinal"}
 
+# Log-scaled threshold slider, same range as LNQReview's ThresholdController.
+LOG_MIN, LOG_MAX, SLIDER_TICKS = -5.0, 0.0, 1000
+THRESHOLD_PRESETS = (0.001, 0.01, 0.1, 0.5)
+
+
+def slider_to_threshold(value):
+    frac = max(0.0, min(1.0, value / SLIDER_TICKS))
+    return 10 ** (LOG_MIN + frac * (LOG_MAX - LOG_MIN))
+
+
+def threshold_to_slider(threshold):
+    if threshold <= 0:
+        return 0
+    frac = (math.log10(threshold) - LOG_MIN) / (LOG_MAX - LOG_MIN)
+    return int(round(max(0.0, min(1.0, frac)) * SLIDER_TICKS))
+
 
 class PDACReview(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -70,6 +97,14 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
         self.stats = None
         self.statsPath = None
         self._byVolume = {}
+        # current scene state
+        self.currentVolumeId = None
+        self.ctNode = None
+        self.segNodes = {}
+        self.probNode = None
+        self.probModel = None
+        self.probVRDisplayNode = None
+        self.threshold = 0.01
 
     # ---- stats -----------------------------------------------------------
     def statsFile(self, root):
@@ -98,15 +133,36 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
     def volume(self, volume_id):
         return self._byVolume.get(volume_id)
 
+    def geometryIssues(self):
+        if not self.stats:
+            return []
+        return [v for v in self.stats["volumes"] if v.get("flags")]
+
     # ---- scene -----------------------------------------------------------
     def clearScene(self):
+        self.probVRDisplayNode = None
+        self.probNode = None
+        self.ctNode = None
+        self.segNodes = {}
         for cls in ("vtkMRMLVolumeRenderingDisplayNode", "vtkMRMLSegmentationNode",
                     "vtkMRMLScalarVolumeNode"):
             for n in slicer.util.getNodesByClass(cls):
                 slicer.mrmlScene.RemoveNode(n)
 
-    def loadSeries(self, volume_id, models=None, with_prob=False):
-        """Load one series: CT + SEG per model (+ probability maps)."""
+    def defaultProbModel(self, rec):
+        """Model with the largest segmentation in this series (ties → first
+        in the stats' model order); falls back to the first with a map."""
+        best, best_ml = None, -1.0
+        for m in self.stats["models"]:
+            e = rec["models"].get(m)
+            if not e or not e.get("prob_path"):
+                continue
+            if e.get("total_ml", 0) > best_ml:
+                best, best_ml = m, e.get("total_ml", 0)
+        return best
+
+    def loadSeries(self, volume_id, prob_model=None):
+        """Load one series: CT + SEG per model + the chosen probability map."""
         rec = self.volume(volume_id)
         if rec is None:
             raise KeyError(f"{volume_id} not in {self.statsPath}")
@@ -114,6 +170,7 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
         if not os.path.isfile(ct_path):
             raise FileNotFoundError(ct_path)
         self.clearScene()
+        self.currentVolumeId = volume_id
         slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
         ct = slicer.util.loadVolume(ct_path)
         ct.SetName(f"PDAC:{volume_id}")
@@ -121,9 +178,8 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
         if disp is not None:
             disp.SetAutoWindowLevel(False)
             disp.SetWindowLevel(400, 40)
-        seg_nodes = []
-        prob_node = None
-        for m in (models or rec["models"].keys()):
+        self.ctNode = ct
+        for m in self.stats["models"]:
             entry = rec["models"].get(m)
             if not entry or not os.path.isfile(entry.get("seg_path", "")):
                 continue
@@ -150,12 +206,7 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
                 node.CreateClosedSurfaceRepresentation()
             except Exception as exc:  # noqa: BLE001
                 logging.warning("closed surface for %s: %s", m, exc)
-            seg_nodes.append(node)
-            if with_prob and prob_node is None and entry.get("prob_path") \
-                    and os.path.isfile(entry["prob_path"]):
-                prob_node = slicer.util.loadVolume(entry["prob_path"])
-                if prob_node is not None:
-                    prob_node.SetName(f"PDAC:{m}-prob")
+            self.segNodes[m] = node
         layoutManager = slicer.app.layoutManager()
         for color in ("Red", "Yellow", "Green"):
             sw = layoutManager.sliceWidget(color)
@@ -163,32 +214,126 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
                 continue
             cn = sw.sliceLogic().GetSliceCompositeNode()
             cn.SetBackgroundVolumeID(ct.GetID())
-            cn.SetForegroundVolumeID(prob_node.GetID() if prob_node else None)
-            if prob_node:
-                cn.SetForegroundOpacity(0.5)
+            cn.SetForegroundVolumeID(None)
             cn.SetLinkedControl(True)
             sw.sliceLogic().FitSliceToAll()
-        if prob_node is not None:
-            pd = prob_node.GetDisplayNode()
-            heat = slicer.util.getFirstNodeByName("Inferno")
-            if pd is not None and heat is not None:
-                pd.SetAndObserveColorNodeID(heat.GetID())
-                pd.SetAutoWindowLevel(False)
-                pd.SetWindowLevel(1.0, 0.5)
-                pd.SetThreshold(0.05, 1.0)
-                pd.SetApplyThreshold(True)
-        # Jump slices to the largest node of the first model that has one.
-        for m in (models or rec["models"].keys()):
+        self.setProbabilityModel(prob_model or self.defaultProbModel(rec))
+        # Jump slices to the largest node of the displayed model (or the
+        # first model that has one).
+        order = [self.probModel] + [m for m in self.stats["models"] if m != self.probModel]
+        for m in order:
             nodes = (rec["models"].get(m) or {}).get("nodes") or []
             if nodes:
                 lps = nodes[0]["centroid_lps"]
-                ras = (-lps[0], -lps[1], lps[2])
-                slicer.modules.markups.logic().JumpSlicesToLocation(*ras, True)
+                slicer.modules.markups.logic().JumpSlicesToLocation(-lps[0], -lps[1], lps[2], True)
                 break
         threeD = layoutManager.threeDWidget(0)
         if threeD is not None:
             threeD.threeDView().resetFocalPoint()
-        return {"ct": ct, "segmentations": seg_nodes, "prob": prob_node}
+        return rec
+
+    # ---- probability display ---------------------------------------------
+    def setProbabilityModel(self, model):
+        """Swap the displayed probability map (only one is kept in memory)."""
+        rec = self.volume(self.currentVolumeId) if self.currentVolumeId else None
+        if self.probVRDisplayNode is not None:
+            slicer.mrmlScene.RemoveNode(self.probVRDisplayNode)
+            self.probVRDisplayNode = None
+        if self.probNode is not None:
+            slicer.mrmlScene.RemoveNode(self.probNode)
+            self.probNode = None
+        self.probModel = model
+        if rec is None or not model:
+            return None
+        entry = rec["models"].get(model) or {}
+        path = entry.get("prob_path")
+        if not path or not os.path.isfile(path):
+            return None
+        # show=False: otherwise loadVolume makes the map the slice background,
+        # displacing the CT.
+        node = slicer.util.loadVolume(path, properties={"show": False})
+        if node is None:
+            return None
+        node.SetName(f"PDAC:{model}-prob")
+        self.probNode = node
+        heat = slicer.util.getFirstNodeByName("Inferno")
+        d = node.GetDisplayNode()
+        if d is not None and heat is not None:
+            d.SetAndObserveColorNodeID(heat.GetID())
+        layoutManager = slicer.app.layoutManager()
+        for color in ("Red", "Yellow", "Green"):
+            sw = layoutManager.sliceWidget(color)
+            if sw is None:
+                continue
+            cn = sw.sliceLogic().GetSliceCompositeNode()
+            if self.ctNode is not None:
+                cn.SetBackgroundVolumeID(self.ctNode.GetID())
+            cn.SetForegroundVolumeID(node.GetID())
+            cn.SetForegroundOpacity(0.55)
+        self.probVRDisplayNode = self._setupVolumeRendering(node)
+        self.applyThreshold(self.threshold)
+        return node
+
+    def applyThreshold(self, threshold):
+        """Slice-view threshold + 3D iso-band, updated together (hot)."""
+        self.threshold = max(10 ** LOG_MIN, min(1.0, float(threshold)))
+        if self.probNode is None:
+            return
+        d = self.probNode.GetDisplayNode()
+        if d is not None:
+            d.SetAutoWindowLevel(False)
+            d.SetWindowLevelMinMax(self.threshold, 1.0)
+            d.SetThreshold(self.threshold, 1.0)
+            d.SetApplyThreshold(True)
+        if self.probVRDisplayNode is not None:
+            self._updateVRTransferFunction(self.probVRDisplayNode, self.threshold)
+
+    @staticmethod
+    def _setupVolumeRendering(prob_node):
+        vrLogic = slicer.modules.volumerendering.logic()
+        disp = vrLogic.GetFirstVolumeRenderingDisplayNode(prob_node)
+        if disp is None:
+            disp = vrLogic.CreateDefaultVolumeRenderingNodes(prob_node)
+        if disp is None:
+            return None
+        disp.SetVisibility(True)
+        return disp
+
+    @staticmethod
+    def _updateVRTransferFunction(disp, threshold):
+        """Spike opacity half a decade wide (in log space) around the
+        threshold, Inferno-ish colors — same iso-band idea as LNQReview so
+        the 3D view shows the surface the slice threshold implies."""
+        propNode = disp.GetVolumePropertyNode()
+        prop = propNode.GetVolumeProperty() if propNode is not None else None
+        if prop is None:
+            return
+        t = max(1e-5, min(0.999, float(threshold)))
+        lo = max(1e-6, t / (10 ** 0.5))
+        hi = min(1.0, t * (10 ** 0.5))
+        opacity = prop.GetScalarOpacity()
+        opacity.RemoveAllPoints()
+        opacity.AddPoint(0.0, 0.0)
+        opacity.AddPoint(lo, 0.0)
+        opacity.AddPoint(t, 1.0)
+        opacity.AddPoint(hi, 0.0)
+        opacity.AddPoint(1.0, 0.0)
+        rgb = prop.GetRGBTransferFunction()
+        rgb.RemoveAllPoints()
+        rgb.AddRGBPoint(0.0, 0.05, 0.03, 0.18)
+        rgb.AddRGBPoint(lo, 0.40, 0.10, 0.40)
+        rgb.AddRGBPoint(t, 1.00, 0.75, 0.10)
+        rgb.AddRGBPoint(hi, 0.95, 0.55, 0.10)
+        rgb.AddRGBPoint(1.0, 1.00, 0.95, 0.85)
+        grad = prop.GetGradientOpacity()
+        grad.RemoveAllPoints()
+        grad.AddPoint(0.0, 1.0)
+        grad.AddPoint(255.0, 1.0)
+        prop.SetShade(True)
+        prop.SetAmbient(0.35)
+        prop.SetDiffuse(0.65)
+        prop.SetSpecular(0.10)
+        prop.SetInterpolationTypeToLinear()
 
 
 # =============================================================================
@@ -202,6 +347,7 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
         self.logic = PDACReviewLogic()
         self._dashboardWindow = None
         self._webWidget = None
+        self._updatingCombo = False
         settings = qt.QSettings()
 
         form = qt.QFormLayout()
@@ -221,10 +367,6 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
         self.minNodeSpin.setToolTip("Connected components smaller than this are counted as specks, not nodes.")
         form.addRow("Min node (mL):", self.minNodeSpin)
 
-        self.probCheck = qt.QCheckBox("Load probability map as overlay")
-        self.probCheck.checked = settings.value("PDACReview/loadProb", "false") == "true"
-        form.addRow("", self.probCheck)
-
         buttons = qt.QHBoxLayout()
         self.computeButton = qt.QPushButton("Compute stats")
         self.computeButton.setToolTip("Run pdac_stats.py over every volume (cached per volume; only new SEGs are recomputed).")
@@ -241,11 +383,53 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
         self.statusLabel = qt.QLabel("")
         self.statusLabel.wordWrap = True
         self.layout.addWidget(self.statusLabel)
+
+        # ---- probability review (LNQReview-style) ----
+        probBox = ctk.ctkCollapsibleButton()
+        probBox.text = "Probability map"
+        self.layout.addWidget(probBox)
+        pl = qt.QVBoxLayout(probBox)
+        self.loadedLabel = qt.QLabel("(no series loaded)")
+        self.loadedLabel.wordWrap = True
+        pl.addWidget(self.loadedLabel)
+        row = qt.QHBoxLayout()
+        row.addWidget(qt.QLabel("Show:"))
+        self.probCombo = qt.QComboBox()
+        self.probCombo.setToolTip("Which model's probability map to display (one at a time; "
+                                  "default = largest segmentation in this series).")
+        row.addWidget(self.probCombo, 1)
+        pl.addLayout(row)
+        row = qt.QHBoxLayout()
+        self.thresholdSlider = qt.QSlider(qt.Qt.Horizontal)
+        self.thresholdSlider.setMinimum(0)
+        self.thresholdSlider.setMaximum(SLIDER_TICKS)
+        self.thresholdSlider.setToolTip("Log-scaled probability threshold: 1e-5 … 1. "
+                                        "Colors voxels ≥ p in the slices and volume-renders the p iso-band in 3D.")
+        self.logic.threshold = float(settings.value("PDACReview/threshold", 0.01))
+        self.thresholdSlider.setValue(threshold_to_slider(self.logic.threshold))
+        self.thresholdLabel = qt.QLabel(f"p ≥ {self.logic.threshold:.4g}")
+        self.thresholdLabel.setMinimumWidth(90)
+        row.addWidget(self.thresholdSlider, 1)
+        row.addWidget(self.thresholdLabel)
+        pl.addLayout(row)
+        presets = qt.QHBoxLayout()
+        for p in THRESHOLD_PRESETS:
+            b = qt.QPushButton(f"{p:g}")
+            b.setToolTip(f"Set threshold to p ≥ {p:g}")
+            b.connect("clicked()", lambda p=p: self.thresholdSlider.setValue(threshold_to_slider(p)))
+            presets.addWidget(b)
+        self.probVisibleCheck = qt.QCheckBox("show")
+        self.probVisibleCheck.checked = True
+        presets.addWidget(self.probVisibleCheck)
+        pl.addLayout(presets)
         self.layout.addStretch(1)
 
         self.computeButton.connect("clicked()", self.onCompute)
         self.dashboardButton.connect("clicked()", self.onOpenDashboard)
         self.rootEdit.connect("currentPathChanged(QString)", self._onRootChanged)
+        self.thresholdSlider.connect("valueChanged(int)", self._onThresholdChanged)
+        self.probCombo.connect("currentIndexChanged(int)", self._onProbComboChanged)
+        self.probVisibleCheck.connect("toggled(bool)", self._onProbVisible)
         self._refreshStatus()
 
     # ---- helpers ---------------------------------------------------------
@@ -262,17 +446,18 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
             self.statusLabel.text = ("No manifest/pdac_stats.json under this root yet — "
                                      "click Compute stats.")
             return
+        n_issues = len(self.logic.geometryIssues())
         self.statusLabel.text = (f"{stats['n_patients']} patients, {stats['n_studies']} studies, "
                                  f"{stats['n_volumes']} volumes, models: {', '.join(stats['models'])} "
-                                 f"(computed {stats['generated_at']}, min node {stats['min_node_ml']} mL)")
+                                 f"(computed {stats['generated_at']}, min node {stats['min_node_ml']} mL; "
+                                 f"{n_issues} series with geometry flags)")
 
     def onCompute(self):
         root = self.root()
         if not os.path.isfile(os.path.join(root, "manifest", "volumes.csv")):
             slicer.util.errorDisplay(f"No manifest/volumes.csv under {root}")
             return
-        settings = qt.QSettings()
-        settings.setValue("PDACReview/minNodeMl", self.minNodeSpin.value)
+        qt.QSettings().setValue("PDACReview/minNodeMl", self.minNodeSpin.value)
         self.progress.visible = True
         self.progress.setValue(0)
         self.computeButton.enabled = False
@@ -313,23 +498,74 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
         self._dashboardWindow.raise_()
 
     def renderDashboard(self):
-        html = build_dashboard_html(self.logic.stats, self.probCheck.checked)
+        html = build_dashboard_html(self.logic.stats)
         self._webWidget.setHtml(html)
 
+    # ---- probability controls -------------------------------------------
+    def _onThresholdChanged(self, value):
+        t = slider_to_threshold(value)
+        self.thresholdLabel.text = f"p ≥ {t:.4g}"
+        qt.QSettings().setValue("PDACReview/threshold", t)
+        self.logic.applyThreshold(t)
+
+    def _onProbComboChanged(self, index):
+        if self._updatingCombo or index < 0:
+            return
+        model = self.probCombo.itemData(index)
+        with slicer.util.tryWithErrorDisplay("Could not load probability map", waitCursor=True):
+            self.logic.setProbabilityModel(model)
+        self._onProbVisible(self.probVisibleCheck.checked)
+
+    def _onProbVisible(self, on):
+        lm = slicer.app.layoutManager()
+        for color in ("Red", "Yellow", "Green"):
+            sw = lm.sliceWidget(color)
+            if sw is not None:
+                sw.sliceLogic().GetSliceCompositeNode().SetForegroundOpacity(0.55 if on else 0.0)
+        if self.logic.probVRDisplayNode is not None:
+            self.logic.probVRDisplayNode.SetVisibility(bool(on))
+
+    def _fillProbCombo(self, rec):
+        self._updatingCombo = True
+        try:
+            self.probCombo.clear()
+            for m in self.logic.stats["models"]:
+                e = rec["models"].get(m)
+                if e and e.get("prob_path"):
+                    self.probCombo.addItem(f"{MODEL_SHORT.get(m, m)}  ({e['total_ml']} mL, {e['n_nodes']} nodes)", m)
+            for i in range(self.probCombo.count):
+                if self.probCombo.itemData(i) == self.logic.probModel:
+                    self.probCombo.setCurrentIndex(i)
+                    break
+        finally:
+            self._updatingCombo = False
+
     # ---- called from JS via window.slicerPython.evalPython ---------------
-    def loadSeries(self, volume_id, with_prob=None):
-        if with_prob is None:
-            with_prob = self.probCheck.checked
-        qt.QSettings().setValue("PDACReview/loadProb", "true" if with_prob else "false")
+    def loadSeries(self, volume_id, prob_model=None):
         try:
             with slicer.util.tryWithErrorDisplay(f"Could not load {volume_id}", waitCursor=True):
-                nodes = self.logic.loadSeries(volume_id, with_prob=with_prob)
-            self.statusLabel.text = (f"Loaded {volume_id}: {len(nodes['segmentations'])} segmentations"
-                                     + (" + probability" if nodes["prob"] else ""))
+                rec = self.logic.loadSeries(volume_id, prob_model=prob_model)
+            self._fillProbCombo(rec)
+            self._onProbVisible(self.probVisibleCheck.checked)
+            self.loadedLabel.text = (f"{rec['patient']} · {rec['study_id']} · #{rec['series_number']} "
+                                     f"{rec['series_description']}"
+                                     + (f"\n⚠ {rec['flags']}" if rec.get("flags") else ""))
+            self.statusLabel.text = (f"Loaded {volume_id}: {len(self.logic.segNodes)} segmentations, "
+                                     f"probability: {self.logic.probModel or 'none'}")
             slicer.util.mainWindow().raise_()
         except Exception as exc:  # noqa: BLE001
             logging.exception("loadSeries %s", volume_id)
             self.statusLabel.text = f"Load failed: {exc}"
+
+    def copyGeometryIssues(self):
+        """Put the geometry-issue list on the clipboard as tab-separated text."""
+        lines = ["patient\tcase\tstudy\tseries\tdescription\tthickness_mm\tslices\tinterpolated\tflags"]
+        for v in self.logic.geometryIssues():
+            lines.append("\t".join(str(x) for x in (
+                v["patient"], v["case_id"], v["study_id"], v["series_number"], v["series_description"],
+                v["slice_thickness_mm"], v["n_slices"], f"{100 * v['missing_frac']:.0f}%", v["flags"])))
+        qt.QApplication.clipboard().setText("\n".join(lines))
+        self.statusLabel.text = f"Copied {len(lines) - 1} geometry-issue rows to the clipboard."
 
 
 # =============================================================================
@@ -349,16 +585,16 @@ def _slim_volume(v):
     return out
 
 
-def build_dashboard_html(stats, load_prob):
+def build_dashboard_html(stats):
     data = {
         "generated_at": stats.get("generated_at"),
         "min_node_ml": stats.get("min_node_ml"),
+        "root": stats.get("root"),
         "models": stats["models"],
         "colors": {m: "rgb(%d,%d,%d)" % MODEL_COLORS.get(m, (150, 150, 150)) for m in stats["models"]},
         "short": {m: MODEL_SHORT.get(m, m) for m in stats["models"]},
         "studies": stats["studies"],
         "volumes": [_slim_volume(v) for v in stats["volumes"]],
-        "load_prob": bool(load_prob),
     }
     return DASHBOARD_TEMPLATE.replace("%%DATA%%", json.dumps(data))
 
@@ -373,6 +609,7 @@ DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
   header { display:flex; flex-wrap:wrap; gap:14px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); }
   header h1 { font-size:16px; margin:0 12px 0 0; }
   header .meta { color:var(--muted); }
+  header .spacer { flex:1; }
   .filters { display:flex; flex-wrap:wrap; gap:10px 16px; padding:8px 16px; border-bottom:1px solid var(--line); align-items:center; }
   .filters label { display:inline-flex; align-items:center; gap:4px; }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:2px; }
@@ -393,12 +630,15 @@ DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
   details { margin:2px 0 6px 0; }
   .nodes { font-size:12px; color:var(--muted); }
   .agree td { text-align:right; }
+  code { font-size:12px; }
 </style></head>
 <body>
 <header>
   <h1>PDAC Review</h1>
   <span id="crumb"></span>
   <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <button id="geomBtn" title="Series whose staging flagged geometry problems"></button>
 </header>
 <div class="filters" id="filters"></div>
 <main id="main"></main>
@@ -407,8 +647,9 @@ const D = %%DATA%%;
 const M = D.models;
 const fmt = (x, d=2) => (x === null || x === undefined || x === "") ? "" : Number(x).toFixed(d);
 const pct = x => (100 * x).toFixed(0) + "%";
+const sid = v => v.study_id || v.case_id;
 let state = { view: "overview", study: null, models: new Set(M), phases: new Set(), spectral: new Set(),
-              thick: new Set(), maxMissing: 1.0, loadProb: D.load_prob };
+              thick: new Set(), maxMissing: 1.0 };
 const charts = [];
 function disposeCharts() { while (charts.length) charts.pop().dispose(); }
 function mkChart(el, option) { const c = echarts.init(el, null, {renderer: "canvas"}); c.setOption(option); charts.push(c); return c; }
@@ -419,14 +660,16 @@ const allSpectral = [...new Set(D.volumes.map(v => v.spectral))].sort();
 const allThick = [...new Set(D.volumes.map(v => v.slice_thickness_mm))].sort((a,b)=>a-b);
 state.phases = new Set(allPhases); state.spectral = new Set(allSpectral); state.thick = new Set(allThick);
 function phaseSec(p) { const v = D.volumes.find(v => (v.phase || "?") === p); return v ? v.phase_seconds : 1e9; }
+const issues = D.volumes.filter(v => v.flags);
 
 function seriesLabel(v) {
   return `#${v.series_number} ${v.phase || ""} ${v.spectral === "monoenergetic" ? (v.series_description.match(/\d+\s*keV/) || ["keV"])[0] : v.spectral} ${v.slice_thickness_mm}mm`;
 }
+function passesFilters(v) {
+  return state.phases.has(v.phase || "?") && state.spectral.has(v.spectral) && state.thick.has(v.slice_thickness_mm) && v.missing_frac <= state.maxMissing;
+}
 function volumesOf(studyId) {
-  return D.volumes.filter(v => (v.study_id || v.case_id) === studyId && state.phases.has(v.phase || "?") &&
-    state.spectral.has(v.spectral) && state.thick.has(v.slice_thickness_mm) && v.missing_frac <= state.maxMissing)
-    .sort((a,b) => a.series_number - b.series_number);
+  return D.volumes.filter(v => sid(v) === studyId && passesFilters(v)).sort((a,b) => a.series_number - b.series_number);
 }
 function activeModels() { return M.filter(m => state.models.has(m)); }
 function median(a) { if (!a.length) return null; const s=[...a].sort((x,y)=>x-y); const h=s.length>>1; return s.length%2 ? s[h] : (s[h-1]+s[h])/2; }
@@ -441,21 +684,19 @@ function renderFilters() {
     ` <span class="muted">| Kind:</span> ` + allSpectral.map(s => chk("spectral", s, s, state.spectral.has(s))).join(" ") +
     ` <span class="muted">| Thickness:</span> ` + allThick.map(t => chk("thick", t, t + " mm", state.thick.has(t))).join(" ") +
     ` <span class="muted">| Max interpolated:</span> <select id="maxMissing">` +
-      [0, 0.1, 0.25, 0.5, 1.0].map(x => `<option value="${x}" ${x === state.maxMissing ? "selected" : ""}>${x === 1 ? "any" : "≤ " + pct(x)}</option>`).join("") + `</select>` +
-    ` <label><input type="checkbox" id="loadProb" ${state.loadProb ? "checked" : ""}>load probability map</label>`;
+      [0, 0.1, 0.25, 0.5, 1.0].map(x => `<option value="${x}" ${x === state.maxMissing ? "selected" : ""}>${x === 1 ? "any" : "≤ " + pct(x)}</option>`).join("") + `</select>`;
   f.querySelectorAll("input[type=checkbox][data-group]").forEach(el => el.addEventListener("change", e => {
     const g = e.target.dataset.group; let val = e.target.dataset.val; if (g === "thick") val = Number(val);
     if (e.target.checked) state[g].add(val); else state[g].delete(val); render();
   }));
   f.querySelector("#maxMissing").addEventListener("change", e => { state.maxMissing = Number(e.target.value); render(); });
-  f.querySelector("#loadProb").addEventListener("change", e => { state.loadProb = e.target.checked; });
 }
 
 function studyRows() {
-  const studies = [...new Set(D.volumes.map(v => v.study_id || v.case_id))];
+  const studies = [...new Set(D.volumes.map(sid))];
   const rows = studies.map(c => {
     const vols = volumesOf(c); if (!vols.length) return null;
-    const v0 = D.volumes.find(v => (v.study_id || v.case_id) === c);
+    const v0 = D.volumes.find(v => sid(v) === c);
     const r = { case_id: c, patient: v0.patient, day: v0.day, n: vols.length, models: {} };
     for (const m of activeModels()) {
       const ml = vols.filter(v => v.models[m]).map(v => v.models[m].total_ml);
@@ -507,11 +748,14 @@ function renderOverview() {
   main.querySelectorAll("tr.clickable").forEach(tr => tr.addEventListener("click", () => openStudy(tr.dataset.case)));
 }
 
-function openStudy(caseId) { state.view = "study"; state.study = caseId; render(); }
+function openStudy(studyId) { state.view = "study"; state.study = studyId; render(); }
+
+function loadButton(v) { return `<button data-vid="${v.volume_id}" title="Load CT + segmentations + probability map in Slicer">Load</button>`; }
+function wireLoadButtons(root) { root.querySelectorAll("button[data-vid]").forEach(b => b.addEventListener("click", () => loadInSlicer(b.dataset.vid))); }
 
 function renderStudy() {
   const vols = volumesOf(state.study);
-  const v0 = D.volumes.find(v => (v.study_id || v.case_id) === state.study);
+  const v0 = D.volumes.find(v => sid(v) === state.study);
   document.getElementById("crumb").innerHTML = `<span class="back" id="back">← overview</span> &nbsp; <b>${v0.patient}</b> day ${v0.day} · ${state.study}`;
   document.getElementById("back").addEventListener("click", () => { state.view = "overview"; render(); });
   const main = document.getElementById("main");
@@ -527,9 +771,10 @@ function renderStudy() {
     series: activeModels().map(m => ({ id: m, name: D.short[m], type: "bar", itemStyle: { color: D.colors[m] },
       data: vols.map(v => v.models[m] ? v.models[m][key] : null) })),
   });
-  mkChart(document.getElementById("c1"), mk("total_ml", "Segmented volume per series", "mL"));
-  mkChart(document.getElementById("c2"), mk("n_nodes", "Node count per series", "nodes"));
-  // agreement across series (volume-only)
+  const c1 = mkChart(document.getElementById("c1"), mk("total_ml", "Segmented volume per series", "mL"));
+  const c2 = mkChart(document.getElementById("c2"), mk("n_nodes", "Node count per series", "nodes"));
+  const go = p => { if (p.componentType === "series") loadInSlicer(vols[p.dataIndex].volume_id, p.seriesId); };
+  c1.on("click", go); c2.on("click", go);
   let a = `<table class="agree"><tr><th class="left">agreement across ${vols.length} series</th><th>median mL</th><th>min</th><th>max</th><th>CV mL</th><th>median nodes</th><th>min</th><th>max</th><th>CV nodes</th></tr>`;
   for (const m of activeModels()) {
     const ml = vols.filter(v => v.models[m]).map(v => v.models[m].total_ml), nn = vols.filter(v => v.models[m]).map(v => v.models[m].n_nodes);
@@ -542,7 +787,7 @@ function renderStudy() {
   for (const m of activeModels()) h += `<th><span class="swatch" style="background:${D.colors[m]}"></span>${D.short[m]} mL</th><th>nodes</th><th>largest</th>`;
   h += `</tr>`;
   for (const v of vols) {
-    h += `<tr><td><button data-vid="${v.volume_id}">Load</button></td><td>${v.series_number}</td><td class="left" title="${v.flags}">${v.series_description}${v.flags ? ' <span class="warn" title="' + v.flags + '">⚠</span>' : ""}</td><td>${v.phase}</td><td>${v.spectral}</td><td>${v.slice_thickness_mm}</td><td>${v.n_slices}</td><td class="${v.missing_frac > 0.25 ? "warn" : ""}">${v.missing_frac ? pct(v.missing_frac) : ""}</td>`;
+    h += `<tr><td>${loadButton(v)}</td><td>${v.series_number}</td><td class="left" title="${v.flags}">${v.series_description}${v.flags ? ' <span class="warn" title="' + v.flags + '">⚠</span>' : ""}</td><td>${v.phase}</td><td>${v.spectral}</td><td>${v.slice_thickness_mm}</td><td>${v.n_slices}</td><td class="${v.missing_frac > 0.25 ? "warn" : ""}">${v.missing_frac ? pct(v.missing_frac) : ""}</td>`;
     for (const m of activeModels()) { const e = v.models[m];
       h += e ? `<td>${fmt(e.total_ml)}</td><td>${e.n_nodes}${e.n_specks ? `<span class="muted"> +${e.n_specks} specks</span>` : ""}</td><td>${fmt(e.largest_ml)}</td>` : `<td></td><td></td><td></td>`; }
     h += `</tr>`;
@@ -552,19 +797,45 @@ function renderStudy() {
   }
   h += `</table>`;
   document.getElementById("tbl").innerHTML = h;
-  main.querySelectorAll("button[data-vid]").forEach(b => b.addEventListener("click", () => loadInSlicer(b.dataset.vid)));
+  wireLoadButtons(main);
 }
 
-function loadInSlicer(vid) {
+function renderGeometry() {
+  document.getElementById("crumb").innerHTML = `<span class="back" id="back">← overview</span> &nbsp; <b>geometry issues</b> · ${issues.length} of ${D.volumes.length} series`;
+  document.getElementById("back").addEventListener("click", () => { state.view = "overview"; render(); });
+  const main = document.getElementById("main");
+  const counts = {};
+  for (const v of issues) for (const f of v.flags.split(";")) { const k = f.split("=")[0]; counts[k] = (counts[k] || 0) + 1; }
+  let h = `<p class="muted">Series whose DICOM → NRRD staging flagged a geometry problem (best-effort volumes were still written; missing slices were interpolated). ` +
+          `Flag counts: ${Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(", ")}. ` +
+          `Also in <code>${D.root}/manifest/geometry_issues.csv</code>. <button id="copyGeom">Copy list</button></p>`;
+  h += `<table><tr><th></th><th class="left">patient</th><th class="left">study</th><th>#</th><th class="left">series</th><th>thk</th><th>slices</th><th>interp.</th><th class="left">flags</th></tr>`;
+  const rows = [...issues].sort((a, b) => b.missing_frac - a.missing_frac || a.patient.localeCompare(b.patient) || a.series_number - b.series_number);
+  for (const v of rows) {
+    h += `<tr><td>${loadButton(v)}</td><td class="left">${v.patient}</td><td class="left">${sid(v)}</td><td>${v.series_number}</td><td class="left">${v.series_description}</td><td>${v.slice_thickness_mm}</td><td>${v.n_slices}</td><td class="${v.missing_frac > 0.25 ? "warn" : ""}">${v.missing_frac ? pct(v.missing_frac) : ""}</td><td class="left">${v.flags.split(";").join(" · ")}</td></tr>`;
+  }
+  h += `</table>`;
+  main.innerHTML = h;
+  wireLoadButtons(main);
+  main.querySelector("#copyGeom").addEventListener("click", () => {
+    if (window.slicerPython) window.slicerPython.evalPython(`slicer.modules.PDACReviewWidget.copyGeometryIssues()`);
+  });
+}
+
+function loadInSlicer(vid, model) {
   if (!window.slicerPython) { alert("Not running inside Slicer (window.slicerPython missing)."); return; }
-  window.slicerPython.evalPython(`slicer.modules.PDACReviewWidget.loadSeries('${vid}', ${state.loadProb ? "True" : "False"})`);
+  const arg = model ? `, '${model}'` : "";
+  window.slicerPython.evalPython(`slicer.modules.PDACReviewWidget.loadSeries('${vid}'${arg})`);
 }
 
 function render() {
   disposeCharts();
   document.getElementById("meta").textContent = `${D.studies.length} studies · ${D.volumes.length} volumes · nodes ≥ ${D.min_node_ml} mL · ${D.generated_at}`;
+  const gb = document.getElementById("geomBtn");
+  gb.textContent = `⚠ Geometry issues (${issues.length})`;
+  gb.onclick = () => { state.view = "geometry"; render(); };
   renderFilters();
-  if (state.view === "study") renderStudy(); else renderOverview();
+  if (state.view === "study") renderStudy(); else if (state.view === "geometry") renderGeometry(); else renderOverview();
 }
 render();
 </script>

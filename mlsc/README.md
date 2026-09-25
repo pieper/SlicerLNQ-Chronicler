@@ -153,8 +153,17 @@ modules.
    count per model across that study's series (min–max, CV in tooltips and
    table); click a study for the per-series view with the agreement table and
    node lists; **Load** opens the series in Slicer (CT + one segmentation per
-   model, optional probability overlay). The first Load asks "Allow Python
-   execution?" — answer Allow with *don't show again*.
+   model + one probability map). **⚠ Geometry issues** lists every series
+   with staging flags (missing / interpolated slices, …) with Load buttons and
+   a Copy button (also `manifest/geometry_issues.csv`) for re-export requests.
+   The first Load asks "Allow Python execution?" — answer Allow with *don't
+   show again*.
+4. **Probability map** panel (LNQReview-style): combo box picks which model's
+   map is shown (default = largest segmentation in the series; one map in
+   memory at a time), the log-scaled slider (1e-5 … 1, presets 0.001 / 0.01 /
+   0.1 / 0.5) thresholds the Inferno overlay in the slices and drives the
+   iso-band volume rendering in 3D, live. Works for series where nothing was
+   segmented, to see residual probability.
 
 Outputs under `<root>/manifest/`: `pdac_stats.json` (dashboard data),
 `pdac_stats.csv` (one row per volume × model), `pdac_nodes.csv` (one row per

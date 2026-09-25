@@ -24,7 +24,7 @@ across the study's series.
 
 Outputs (under <root>/manifest/): pdac_stats.json (what the dashboard
 reads), pdac_stats.csv (one row per volume x model), pdac_nodes.csv (one row
-per node). Per-volume results are cached in <vol_dir>/pdac-stats.json and
+per node), geometry_issues.csv (series with staging geometry flags). Per-volume results are cached in <vol_dir>/pdac-stats.json and
 recomputed only when a SEG is newer or --force is given.
 
 Runs anywhere SimpleITK + numpy are importable: Slicer's Python (the
@@ -285,6 +285,17 @@ def write_outputs(root, result):
                              r["slice_thickness_mm"], r["n_slices"], r["missing_frac"], r["flags"], m,
                              e["total_ml"], e["n_nodes"], e["n_specks"], e["nodes_ml"], e["largest_ml"],
                              q.get("pred_volume_mL_p0.001", ""), q.get("prob_max", "")])
+    # Series whose staging flagged geometry problems — the list to hand back
+    # for re-export / investigation.
+    with open(os.path.join(manifest, "geometry_issues.csv"), "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(["patient", "case_id", "study_id", "series_number", "series_description",
+                     "slice_thickness_mm", "n_slices", "missing_frac", "flags", "volume_id"])
+        for r in result["volumes"]:
+            if r["flags"]:
+                wr.writerow([r["patient"], r["case_id"], r["study_id"], r["series_number"],
+                             r["series_description"], r["slice_thickness_mm"], r["n_slices"],
+                             r["missing_frac"], r["flags"], r["volume_id"]])
     with open(os.path.join(manifest, "pdac_nodes.csv"), "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["patient", "case_id", "volume_id", "model", "node", "ml", "short_mm", "long_mm",
