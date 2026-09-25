@@ -64,7 +64,7 @@ SCOUT_TOKENS = {"LOCALIZER", "SCOUT", "TOPOGRAM", "TOPO"}
 SPECTRAL_PATTERNS = [
     ("vnc", re.compile(r"\bVNC\b|VIRTUAL[ _]?NON[ _]?CONTRAST", re.I)),
     ("iodine", re.compile(r"IODINE|\bIMAP\b|I-?MAP", re.I)),
-    ("monoenergetic", re.compile(r"MONO|\bkeV\b|\d{2,3}\s*keV", re.I)),
+    ("monoenergetic", re.compile(r"MONO|\bkeV\b|\d{2,3}\s*keV|\bME\d{2,3}\b", re.I)),   # SPP_ME70 = 70 keV
     ("zeff", re.compile(r"Z[ _-]?EFF", re.I)),
     ("spectral", re.compile(r"SPECTRAL|\bSPP\b|PURE[ _]?LUMEN|CALCIUM[ _]?REMOVAL", re.I)),
 ]
