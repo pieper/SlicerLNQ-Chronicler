@@ -222,9 +222,18 @@ cmd_sync() {   # cmd_sync push|pull --remote R [extra sync_cases.py args]
 }
 
 cmd_sync_log() {
-  local f
-  f=$(ls -t "$WORK"/logs/sync-*-[0-9]*.out 2>/dev/null | head -1)
-  [ -n "$f" ] || { echo "no sync logs under $WORK/logs" >&2; exit 1; }
+  # Follow the log of the most recently submitted push/pull job (from the
+  # saved job id), waiting for the file if the job is still queued.
+  local idfile mode jid f
+  idfile=$(ls -t "$WORK"/manifest/sync-*.jobid 2>/dev/null | head -1)
+  [ -n "$idfile" ] || { echo "no sync job submitted yet (run_pipeline.sh push|pull)" >&2; exit 1; }
+  mode=$(basename "$idfile" .jobid | sed 's/^sync-//')
+  jid=$(cat "$idfile")
+  f="$WORK/logs/sync-$mode-$jid.out"
+  while [ ! -f "$f" ]; do
+    echo "job $jid not started yet: $(squeue -j "$jid" -h -o '%T %R' 2>/dev/null || echo 'not in queue')"
+    sleep 15
+  done
   echo "== $f"; tail -n 40 -f "$f"
 }
 
