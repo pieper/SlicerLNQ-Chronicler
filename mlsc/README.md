@@ -18,13 +18,23 @@ faces). Nothing here uploads anything; manifests and logs contain only the
 `E########` case id, series number/description/UID, geometry and scanner
 settings. NRRD files carry no DICOM tags.
 
-**Copying the results elsewhere** (Dropbox is MGB-approved for PHI): the real
-files are `E*/`, `manifest/` and `cohort/qc/`; `cohort/nrrd/` and
-`cohort/predictions/` are symlinks. Copy the real files with
-`--exclude 'cohort/nrrd/**' --exclude 'cohort/predictions/**' --skip-links`,
-then on the destination run
-`build_cohort.py --work <dest> --models "<models>" --refresh-links`
-(standard library only) to recreate the symlink view for LNQReview.
+**Copying the results elsewhere** (Dropbox is MGB-approved for PHI): use
+`sync_cases.py`, which drives rclone one whole case at a time in E-number
+order, is safe to re-run (only missing files move), reports which cases are
+complete with an ETA, and only ever copies the real files (`E*/`,
+`manifest/`, `cohort/qc/`, `logs/`). In `--pull` mode it rebuilds the
+`cohort/nrrd` + `cohort/predictions` symlink view after every case, so the
+first cases can be opened in LNQReview while the rest are still arriving:
+
+    # Martinos → Dropbox (as a basic-partition job)
+    sbatch -A lnqmlsc -p basic --mem 4G --time 1-00:00:00 --job-name sync-push \
+      --output /vast/lnq/pdac-processing/logs/sync-push-%j.out \
+      --wrap "python3 /vast/lnq/SlicerLNQ-Chronicler/mlsc/sync_cases.py \
+              --work /vast/lnq/pdac-processing --remote dropbox:PDAC --push"
+    # Dropbox → laptop (system python3 + rclone)
+    sync_cases.py --work /Volumes/<enc>/pdac-processing --remote dropbox:PDAC --pull
+    # what is complete so far
+    sync_cases.py --work ... --remote dropbox:PDAC --push --status
 
 ## Layout on /vast/lnq
 
@@ -143,6 +153,7 @@ functional groups with pydicom. Flags/tags end up in `series_index.csv`,
 | `predict_batch.py` / `predict.sbatch` | GPU (array/(model,chunk)) | model loaded once per chunk; SEG + prob; per-volume JSONL |
 | `bench.sbatch` / `bench_report.py` | GPU partitions | pick the lightest partition that fits |
 | `qc.sbatch` (+ `../bin/idc-batch-qc.py`, `qc_extras.py`) | basic | `qc.csv` + PNGs per model |
+| `sync_cases.py` | Martinos (basic) / laptop | case-by-case rclone push/pull with completion table + ETA |
 | `tests/` | laptop | synthetic-DICOM tests: `python -m pytest mlsc/tests -q` |
 
 `predict_batch.py` reuses `lnq_segmenter.registry` / `cache` /
