@@ -16,6 +16,10 @@
 #   qc [--after JOB]      qc.csv + PNGs per model
 #   all [--limit N]       stage → build → (build submits predict → qc)
 #   status                queue, on-disk counts, failures, seconds/volume, ETA
+#   push --remote R [args]   copy results to rclone remote R (e.g. dropbox:PDAC) case by case, as a job
+#   pull --remote R [args]   the reverse (remote → $WORK), as a job
+#   sync-log              tail the log of the most recent push/pull job
+#   sync-status --remote R   which cases are complete on the remote (no transfer)
 #
 # Only sbatch/squeue/sacct and a directory walk run here; everything else is a job.
 set -euo pipefail
@@ -200,6 +204,37 @@ cmd_status() {
     --concurrency "${GPU_CONCURRENCY:-6}"
 }
 
+cmd_sync() {   # cmd_sync push|pull --remote R [extra sync_cases.py args]
+  local mode="$1" remote="" extra=""; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --remote) remote="$2"; shift 2;;
+      *) extra="$extra $1"; shift;;
+    esac
+  done
+  [ -n "$remote" ] || { echo "$mode: --remote <rclone path> required (e.g. dropbox:PDAC)" >&2; exit 2; }
+  local jid
+  jid=$(SYNC_MODE="$mode" SYNC_REMOTE="$remote" SYNC_EXTRA="$extra" \
+        submit -p "$CPU_PARTITION" --job-name "lnq-sync-$mode" \
+        --output "$WORK/logs/sync-$mode-%j.out" -- "$MLSC_DIR/sync.sbatch")
+  echo "$jid" > "$WORK/manifest/sync-$mode.jobid"
+  echo "sync-$mode job $jid → $WORK/logs/sync-$mode-$jid.out   (run_pipeline.sh sync-log to follow)"
+}
+
+cmd_sync_log() {
+  local f
+  f=$(ls -t "$WORK"/logs/sync-*-[0-9]*.out 2>/dev/null | head -1)
+  [ -n "$f" ] || { echo "no sync logs under $WORK/logs" >&2; exit 1; }
+  echo "== $f"; tail -n 40 -f "$f"
+}
+
+cmd_sync_status() {
+  local remote=""
+  while [ $# -gt 0 ]; do case "$1" in --remote) remote="$2"; shift 2;; *) shift;; esac; done
+  [ -n "$remote" ] || { echo "sync-status: --remote required" >&2; exit 2; }
+  "$PY" "$MLSC_DIR/sync_cases.py" --work "$WORK" --remote "$remote" --push --status
+}
+
 case "$CMD" in
   probe) cmd_probe "$@";;
   setup) cmd_setup "$@";;
@@ -213,5 +248,8 @@ case "$CMD" in
   qc) cmd_qc "$@";;
   all) cmd_all "$@";;
   status) cmd_status "$@";;
+  push|pull) cmd_sync "$CMD" "$@";;
+  sync-log) cmd_sync_log "$@";;
+  sync-status) cmd_sync_status "$@";;
   *) echo "unknown command: $CMD" >&2; exit 2;;
 esac

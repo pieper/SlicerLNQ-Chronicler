@@ -19,10 +19,8 @@ rebuilt locally (build_cohort.py --refresh-links) after every case.
 Prints, after each case, the cases completed so far, GB moved, measured
 throughput and an ETA for the full set. State (per-case bytes / seconds /
 completion time) is kept in <work>/manifest/sync-<push|pull>.json.
-Standard library + rclone only.
+Standard library (Python >= 3.6) + rclone only.
 """
-from __future__ import annotations
-
 import argparse
 import datetime
 import json
@@ -39,7 +37,8 @@ SHARED_EXCLUDES = ["manifest/chunks/**", "manifest/sync-*.json"]
 
 def sh(args, stream=True):
     """Run rclone; stream its (stats) lines with a prefix; return exit code."""
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            universal_newlines=True)
     last = ""
     for line in proc.stdout:
         line = line.rstrip()
@@ -64,7 +63,8 @@ def local_cases(work):
 
 
 def remote_cases(remote):
-    out = subprocess.run(["rclone", "lsjson", "--dirs-only", remote], capture_output=True, text=True)
+    out = subprocess.run(["rclone", "lsjson", "--dirs-only", remote], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, universal_newlines=True)
     if out.returncode != 0:
         raise SystemExit(f"rclone lsjson {remote} failed: {out.stderr.strip()}")
     return sorted(e["Name"] for e in json.loads(out.stdout) if CASE_RE.match(e["Name"]))
@@ -81,7 +81,8 @@ def local_bytes(path):
 
 
 def remote_bytes(remote):
-    out = subprocess.run(["rclone", "size", "--json", remote], capture_output=True, text=True)
+    out = subprocess.run(["rclone", "size", "--json", remote], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, universal_newlines=True)
     if out.returncode != 0:
         return 0
     return int(json.loads(out.stdout).get("bytes", 0))
