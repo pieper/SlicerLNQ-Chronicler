@@ -13,7 +13,9 @@ part=${SLURM_JOB_PARTITION:-unknown}
 echo "== $(date -u) host=$(hostname) partition=$part volumes=$BENCH_VOLUMES"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null || true
 rc=0
-for m in $MODELS; do
+BENCH_MODELS=${BENCH_MODELS:-$MODELS}
+echo "== bench models: $BENCH_MODELS"
+for m in $BENCH_MODELS; do
   echo "== model $m"
   python "$MLSC_DIR/predict_batch.py" --work "$WORK" --model "$m" --volumes "$BENCH_VOLUMES" \
     --no-skip-existing --bench-out "$WORK/manifest/bench/$part-$m.json" || rc=1

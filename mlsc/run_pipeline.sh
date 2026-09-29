@@ -10,7 +10,8 @@
 #   stage [--limit N] [--force] [--strict]
 #                         DICOM → NRRD, one array task per case
 #   build [--after JOB]   manifests + cohort symlinks + predict_tasks.tsv
-#   bench [--volumes a,b] every model over 3 representative volumes on each bench partition
+#   bench [--volumes a,b] [--models "m1 m2"] [--partitions "p1 p2"]
+#                         models (default all) over 3 representative volumes on each bench partition
 #   report                bench_report.py table + recommendation
 #   predict [--then-qc]   GPU array over predict_tasks.tsv (needs build first)
 #   qc [--after JOB]      qc.csv + PNGs per model
@@ -121,17 +122,22 @@ cmd_build() {
 }
 
 cmd_bench() {
-  local volumes=""
+  local volumes="" models="$MODELS" partitions="${BENCH_PARTITIONS:-$GPU_PARTITION}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --volumes) volumes="$2"; shift 2;;
+      --models) models="$2"; shift 2;;
+      --partitions) partitions="$2"; shift 2;;
       *) echo "bench: unknown option $1" >&2; exit 2;;
     esac
   done
+  for m in $models; do
+    case " $MODELS " in *" $m "*) ;; *) echo "bench: $m is not in MODELS ($MODELS) — add it to $CONF first" >&2; exit 2;; esac
+  done
   [ -n "$volumes" ] || volumes=$("$PY" "$MLSC_DIR/bench_report.py" --work "$WORK" --select --n 3)
   echo "bench volumes: $volumes" >&2
-  for p in ${BENCH_PARTITIONS:-$GPU_PARTITION}; do
-    BENCH_VOLUMES="$volumes" submit -p "$p" --gpus=1 --cpus-per-task "${PREDICT_CPUS:-3}" \
+  for p in $partitions; do
+    BENCH_VOLUMES="$volumes" BENCH_MODELS="$models" submit -p "$p" --gpus=1 --cpus-per-task "${PREDICT_CPUS:-3}" \
       --mem "${BENCH_MEM:-128G}" --time "${BENCH_TIME:-0-04:00:00}" \
       --output "$WORK/logs/bench-$p-%j.out" -- "$MLSC_DIR/bench.sbatch"
   done
