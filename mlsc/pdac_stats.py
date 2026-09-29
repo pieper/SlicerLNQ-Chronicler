@@ -2,8 +2,10 @@
 """pdac_stats.py — per-series lymph-node segment statistics for the PDAC
 photon-counting CT cohort, feeding the PDACReview Slicer dashboard.
 
-For every staged volume (manifest/volumes.csv) and every model with a
-<model>-seg.nrrd next to the CT, computes:
+For every staged volume (manifest/volumes.csv) and every *stats key* — one
+per lnq model (binary SEG) and one per class of an external multi-label model
+(e.g. pants-v1/lesion, pants-v1/pancreas; see model_registry.stats_keys) —
+computes:
 
   * total segmented volume (mL) and voxel count
   * connected components ("nodes", 26-connected) with per-node volume (mL),
@@ -43,6 +45,9 @@ import statistics
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import model_registry  # noqa: E402
+
 PHASE_RE = re.compile(r"(\d+)\s*(sec|min)\b", re.I)
 DEFAULT_MIN_NODE_ML = 0.05          # ~4.6 mm sphere; below that is a speck
 
@@ -81,13 +86,20 @@ def discover_models(root):
     return sorted(d for d in os.listdir(pred) if os.path.isdir(os.path.join(pred, d)))
 
 
-def seg_stats(seg_path, min_node_ml):
-    """Segment statistics for one binary SEG NRRD via SimpleITK."""
+def seg_stats(seg_path, min_node_ml, label_values=None):
+    """Component statistics for one SEG NRRD via SimpleITK. label_values:
+    which labels count as foreground (None = anything > 0)."""
     import SimpleITK as sitk
     img = sitk.ReadImage(seg_path)
     sx, sy, sz = img.GetSpacing()
     voxel_ml = sx * sy * sz / 1000.0
-    binary = sitk.Cast(img > 0, sitk.sitkUInt8)
+    if label_values:
+        binary = None
+        for v in label_values:
+            m = sitk.Cast(img == int(v), sitk.sitkUInt8)
+            binary = m if binary is None else sitk.Or(binary, m)
+    else:
+        binary = sitk.Cast(img > 0, sitk.sitkUInt8)
     stats = sitk.StatisticsImageFilter()
     stats.Execute(binary)
     n_voxels = int(round(stats.GetSum()))
@@ -121,8 +133,10 @@ def seg_stats(seg_path, min_node_ml):
     return out
 
 
-def volume_record(root, vrow, models, min_node_ml, force, patients, qc_rows):
-    """Compute (or load cached) stats for one staged volume across models."""
+def volume_record(root, vrow, keys, min_node_ml, force, patients, qc_rows):
+    """Compute (or load cached) stats for one staged volume across stats keys.
+    keys: [(key, cfg)] from model_registry.all_stats_keys, cfg['label_values']
+    already resolved."""
     ct_path = os.path.join(root, vrow["case_id"], vrow["series_dir"], "ct.nrrd")
     vol_dir = os.path.dirname(ct_path)
     cache_path = os.path.join(vol_dir, "pdac-stats.json")
@@ -133,35 +147,42 @@ def volume_record(root, vrow, models, min_node_ml, force, patients, qc_rows):
                 cached = json.load(f)
         except (OSError, json.JSONDecodeError):
             cached = {}
-        if cached.get("min_node_ml") != min_node_ml:
+        if cached.get("min_node_ml") != min_node_ml or cached.get("schema") != 2:
             cached = {}
     per_model = dict(cached.get("models", {}))
     changed = False
-    for m in models:
-        seg = os.path.join(vol_dir, f"{m}-seg.nrrd")
-        prob = os.path.join(vol_dir, f"{m}-prob.nrrd")
+    wanted = set()
+    for key, cfg in keys:
+        wanted.add(key)
+        seg = os.path.join(vol_dir, cfg["model"] + cfg["seg_suffix"])
+        prob = os.path.join(vol_dir, cfg["model"] + cfg["prob_suffix"])
         if not os.path.isfile(seg):
-            per_model.pop(m, None)
+            per_model.pop(key, None)
             continue
         seg_mtime = os.path.getmtime(seg)
-        entry = per_model.get(m)
+        entry = per_model.get(key)
         if entry and entry.get("seg_mtime") == seg_mtime:
             continue
-        entry = seg_stats(seg, min_node_ml)
+        entry = seg_stats(seg, min_node_ml, cfg.get("label_values"))
         entry["seg_mtime"] = seg_mtime
         entry["seg_path"] = seg
         entry["prob_path"] = prob if os.path.isfile(prob) else None
-        per_model[m] = entry
+        entry["model"] = cfg["model"]
+        entry["label_values"] = cfg.get("label_values")
+        per_model[key] = entry
+        changed = True
+    for stale in [k for k in per_model if k not in wanted]:
+        per_model.pop(stale)
         changed = True
     if changed or not cached:
         with open(cache_path + ".partial", "w") as f:
-            json.dump({"volume_id": vrow["volume_id"], "min_node_ml": min_node_ml,
+            json.dump({"volume_id": vrow["volume_id"], "min_node_ml": min_node_ml, "schema": 2,
                        "models": per_model,
                        "computed_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
         os.replace(cache_path + ".partial", cache_path)
     # join qc.csv probability numbers (cheap, keeps the prob map out of memory)
-    for m, entry in per_model.items():
-        q = qc_rows.get(m, {}).get(vrow["volume_id"])
+    for key, entry in per_model.items():
+        q = qc_rows.get(key, {}).get(vrow["volume_id"])
         if q:
             entry["qc"] = {k: q.get(k, "") for k in
                            ("pred_volume_mL_p0.5", "pred_volume_mL_p0.001", "prob_max", "prob_p99")}
@@ -219,11 +240,52 @@ def study_summary(study_id, vols, models):
     return out
 
 
+def resolve_keys(root, models):
+    """[(key, cfg)] with cfg['label_values'] resolved from each external
+    model's dataset.json (looked up next to the first seg found, via the
+    models cache, or skipped with a warning)."""
+    keys = []
+    for m in models:
+        spec = model_registry.spec(m)
+        dataset_labels = None
+        if spec is not None:
+            for cand in (os.environ.get("MLSC_MODEL_DIR_" + m.upper().replace("-", "_")),
+                         model_registry.model_folder(m, os.environ.get("MODELS_CACHE", "")),
+                         os.path.join(root, "manifest", "models", m)):
+                if cand and os.path.isfile(os.path.join(cand, "dataset.json")):
+                    dataset_labels = model_registry.read_dataset_labels(cand)
+                    break
+            if dataset_labels is None:
+                print(f"WARN {m}: dataset.json not found (set MODELS_CACHE or copy it to "
+                      f"manifest/models/{m}/dataset.json); using labels from models.json if numeric",
+                      file=sys.stderr)
+        for key, cfg in model_registry.stats_keys(m):
+            cfg = dict(cfg)
+            if cfg["labels"] is None:
+                cfg["label_values"] = None
+            elif dataset_labels is not None:
+                cfg["label_values"] = model_registry.resolve_label_values(cfg["labels"], dataset_labels)
+            else:
+                nums = [int(x) for x in cfg["labels"] if str(x).isdigit()]
+                if not nums:
+                    print(f"WARN {key}: cannot resolve labels {cfg['labels']}; skipping", file=sys.stderr)
+                    continue
+                cfg["label_values"] = nums
+            keys.append((key, cfg))
+    return keys
+
+
 def compute(root, models=None, min_node_ml=DEFAULT_MIN_NODE_ML, force=False, limit=None,
             progress=None):
     """Compute everything and write the manifest outputs. Returns the JSON dict."""
     t0 = time.time()
     models = models or discover_models(root)
+    keys = resolve_keys(root, models)
+    key_names = [k for k, _ in keys]
+    display = {k: {"model": c["model"], "short": c["short"], "color": c["color"],
+                   "component": c["component"], "default_prob": c["default_prob"],
+                   "seg_suffix": c["seg_suffix"], "prob_suffix": c["prob_suffix"],
+                   "label_values": c.get("label_values")} for k, c in keys}
     volumes = [r for r in read_csv(os.path.join(root, "manifest", "volumes.csv"))]
     if limit:
         volumes = volumes[:limit]
@@ -232,16 +294,17 @@ def compute(root, models=None, min_node_ml=DEFAULT_MIN_NODE_ML, force=False, lim
                                "day": int(r["days_since_patient_first_study"] or 0)}
                 for r in inventory}
     qc_rows = {}
-    for m in models:
-        rows = read_csv(os.path.join(root, "cohort", "qc", m, "qc.csv"))
-        qc_rows[m] = {r["case_id"]: r for r in rows}
+    for k, c in keys:
+        rows = read_csv(os.path.join(root, "cohort", "qc", c["model"], "qc.csv"))
+        if rows and c["labels"] is None:            # binary QC only applies to lnq keys
+            qc_rows[k] = {r["case_id"]: r for r in rows}
 
     records = []
     for i, vrow in enumerate(volumes, 1):
         if progress:
             progress(i, len(volumes), vrow["volume_id"])
         try:
-            records.append(volume_record(root, vrow, models, min_node_ml, force, patients, qc_rows))
+            records.append(volume_record(root, vrow, keys, min_node_ml, force, patients, qc_rows))
         except Exception as exc:  # noqa: BLE001 — one bad volume shouldn't stop the report
             print(f"WARN {vrow['volume_id']}: {type(exc).__name__}: {exc}", file=sys.stderr)
     records.sort(key=lambda r: (r["patient"], r["day"], r["study_id"], r["series_number"]))
@@ -249,11 +312,12 @@ def compute(root, models=None, min_node_ml=DEFAULT_MIN_NODE_ML, force=False, lim
     by_study = {}
     for r in records:
         by_study.setdefault(r["study_id"], []).append(r)
-    studies = [study_summary(sid, v, models) for sid, v in by_study.items()]
+    studies = [study_summary(sid, v, key_names) for sid, v in by_study.items()]
     studies.sort(key=lambda s: (s["patient"], s["day"], s["study_id"]))
 
     result = {"generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-              "root": root, "models": models, "min_node_ml": min_node_ml,
+              "root": root, "models": key_names, "model_names": models, "display": display,
+              "min_node_ml": min_node_ml,
               "n_patients": len({r["patient"] for r in records}),
               "n_studies": len(studies), "n_volumes": len(records),
               "studies": studies, "volumes": records,
@@ -271,18 +335,19 @@ def write_outputs(root, result):
     os.replace(path + ".partial", path)
 
     cols = ["patient", "day", "case_id", "study_id", "volume_id", "series_number", "series_description", "phase",
-            "spectral", "kernel", "slice_thickness_mm", "n_slices", "missing_frac", "flags", "model",
+            "spectral", "kernel", "slice_thickness_mm", "n_slices", "missing_frac", "flags", "model", "class",
             "total_ml", "n_nodes", "n_specks", "nodes_ml", "largest_ml",
             "qc_pred_volume_mL_p0.001", "qc_prob_max"]
     with open(os.path.join(manifest, "pdac_stats.csv"), "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(cols)
         for r in result["volumes"]:
-            for m, e in r["models"].items():
+            for key, e in r["models"].items():
                 q = e.get("qc", {})
                 wr.writerow([r["patient"], r["day"], r["case_id"], r["study_id"], r["volume_id"], r["series_number"],
                              r["series_description"], r["phase"], r["spectral"], r["kernel"],
-                             r["slice_thickness_mm"], r["n_slices"], r["missing_frac"], r["flags"], m,
+                             r["slice_thickness_mm"], r["n_slices"], r["missing_frac"], r["flags"],
+                             e.get("model", key), key.split("/", 1)[1] if "/" in key else "",
                              e["total_ml"], e["n_nodes"], e["n_specks"], e["nodes_ml"], e["largest_ml"],
                              q.get("pred_volume_mL_p0.001", ""), q.get("prob_max", "")])
     # Series whose staging flagged geometry problems — the list to hand back
@@ -298,12 +363,12 @@ def write_outputs(root, result):
                              r["missing_frac"], r["flags"], r["volume_id"]])
     with open(os.path.join(manifest, "pdac_nodes.csv"), "w", newline="") as f:
         wr = csv.writer(f)
-        wr.writerow(["patient", "case_id", "volume_id", "model", "node", "ml", "short_mm", "long_mm",
+        wr.writerow(["patient", "case_id", "volume_id", "key", "component", "ml", "short_mm", "long_mm",
                      "centroid_L", "centroid_P", "centroid_S"])
         for r in result["volumes"]:
-            for m, e in r["models"].items():
+            for key, e in r["models"].items():
                 for k, n in enumerate(e["nodes"], 1):
-                    wr.writerow([r["patient"], r["case_id"], r["volume_id"], m, k, n["ml"],
+                    wr.writerow([r["patient"], r["case_id"], r["volume_id"], key, k, n["ml"],
                                  n["short_mm"], n["long_mm"], *n["centroid_lps"]])
 
 
@@ -311,7 +376,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", required=True, help="Pipeline tree, e.g. /Volumes/12T/PHI/PDAC")
-    ap.add_argument("--models", default=None, help="Space/comma-separated; default: all under cohort/predictions")
+    ap.add_argument("--models", default=None,
+                    help="Space/comma-separated model names; default: all under cohort/predictions")
     ap.add_argument("--min-node-ml", type=float, default=DEFAULT_MIN_NODE_ML)
     ap.add_argument("--force", action="store_true", help="Ignore per-volume caches.")
     ap.add_argument("--limit", type=int, default=None)

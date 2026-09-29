@@ -1,9 +1,11 @@
-# mlsc/ — PCCT → LNQ inference on the Martinos MLSC cluster
+# mlsc/ — PCCT → LNQ + PanTS inference on the Martinos MLSC cluster
 
 Runs the four `lnq-segmenter` models (`mediastinal-v1`, `axillary-v1`,
-`inguinal-v1`, `abdominopelvic-v1`) over every axial CT series of the PDAC
-photon-counting-CT studies, keeping probability maps, and produces the
-`qc.csv` + directory layout that LNQReview / LNQStudio already read.
+`inguinal-v1`, `abdominopelvic-v1`) and external nnU-Net v2 models listed in
+`models.json` (currently `pants-v1`, the PanTS pancreas / pancreatic-lesion
+model) over every axial CT series of the PDAC photon-counting-CT studies,
+keeping probability maps, and produces the `qc.csv` + directory layout that
+LNQReview / LNQStudio already read.
 
 It is the Slurm re-cut of the Jetstream2 flow (`bin/ingest-idc-cohort.py` →
 `bin/run-extra-anatomies.py` → `bin/idc-batch-qc.py`), following
@@ -55,7 +57,10 @@ first cases can be opened in LNQReview while the rest are still arriving:
         ct.nrrd                       int16 HU, gzip, LPS
         geometry.json                 decision, flags, spacing stats, tags, source files
         mediastinal-v1-seg.nrrd       + -prob.nrrd (float32 foreground softmax on the CT grid)
-        axillary-v1-seg.nrrd ...      x4 models
+        axillary-v1-seg.nrrd ...      x4 lnq models
+        pants-v1.seg.nrrd             28-label Slicer segmentation (named, colored segments)
+        pants-v1-prob.nrrd            pancreatic_lesion probability
+        pants-v1-pancreas-prob.nrrd   pancreas (head+body+tail+duct+lesion) probability
       series.csv                      per-case manifest (aggregated into manifest/)
     cohort/                           flat symlink view = what LNQReview expects
       nrrd/<volume_id>_0000.nrrd  →   ../../E…/…/ct.nrrd
@@ -113,6 +118,26 @@ arrays run at most `GPU_CONCURRENCY` (default 6) at a time. Check
 `showpending` / `shownodes` before a big run and drop `GPU_CONCURRENCY` if the
 partition is busy.
 
+## External models (models.json)
+
+`models.json` describes nnU-Net v2 model folders that are not lnq-segmenter
+bundles: HuggingFace repo, folder under `$MODELS_CACHE`, folds / checkpoint,
+trainer shims (a custom trainer name mapped to the stock class it inherits
+from — enough when the custom trainer only changes training), output file
+suffixes, and the *stats keys* the dashboard shows (e.g. `pants-v1/lesion`,
+`pants-v1/pancreas`, each with the dataset.json label names it covers).
+`setup-env` downloads them with `hf download`.
+
+For these models `predict_batch.py` does not use nnU-Net's stock export: the
+CT is written as a temporary `.nii.gz` so nnU-Net's own reader reorients it
+exactly as in training (PanTS was trained without left-right mirroring), the
+logits are turned into labels at the working resolution (1 mm), and only the
+label map plus the classes of interest are resampled back onto the CT grid.
+`tests/test_pants_parity.py` checks this against the stock export with the
+real weights (set `PANTS_MODEL_DIR`; CPU is fine).
+
+PanTS license: code + dataset CC BY-NC-ND 4.0 (research use), checkpoint MIT.
+
 ## What staging does (stage_dicom.py)
 
 Per case: read every header, group by series, then
@@ -166,8 +191,11 @@ modules.
    segmented, to see residual probability.
 
 Outputs under `<root>/manifest/`: `pdac_stats.json` (dashboard data),
-`pdac_stats.csv` (one row per volume × model), `pdac_nodes.csv` (one row per
-connected component ≥ min node size, with volume, short/long axis, centroid).
+`pdac_stats.csv` (one row per volume × stats key, i.e. per lnq model and per
+PanTS class), `pdac_nodes.csv` (one row per connected component ≥ min size,
+with volume, short/long axis, centroid). Resolving PanTS label names needs
+its `dataset.json`: set `MODELS_CACHE` or copy it to
+`<root>/manifest/models/pants-v1/dataset.json` (the sync does this).
 Patient index and day offsets come from `inventory.csv` when present.
 
 ## Files
@@ -184,6 +212,7 @@ Patient index and day offsets come from `inventory.csv` when present.
 | `bench.sbatch` / `bench_report.py` | GPU partitions | pick the lightest partition that fits |
 | `qc.sbatch` (+ `../bin/idc-batch-qc.py`, `qc_extras.py`) | basic | `qc.csv` + PNGs per model |
 | `sync_cases.py` | Martinos (basic) / laptop | case-by-case rclone push/pull with completion table + ETA |
+| `models.json` / `model_registry.py` | everywhere | external model specs, output naming, stats keys, `.seg.nrrd` writer |
 | `pdac_stats.py` / `PDACReview/PDACReview.py` | laptop (Slicer) | PDAC cohort segment statistics + ECharts dashboard module |
 | `tests/` | laptop | synthetic-DICOM tests: `python -m pytest mlsc/tests -q` |
 

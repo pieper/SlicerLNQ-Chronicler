@@ -36,6 +36,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import model_registry  # noqa: E402
 from stage_dicom import SERIES_COLUMNS  # noqa: E402
 
 
@@ -71,38 +72,41 @@ def relink(link_path, target):
     return True
 
 
+def output_files(volume_row, model):
+    """role -> path of every file `model` writes for this volume (model_registry)."""
+    return model_registry.output_files(os.path.dirname(volume_row["ct_path"]), model)
+
+
 def output_paths(volume_row, model):
-    vol_dir = os.path.dirname(volume_row["ct_path"])
-    return (os.path.join(vol_dir, f"{model}-seg.nrrd"),
-            os.path.join(vol_dir, f"{model}-prob.nrrd"))
+    """(seg, prob) for callers that only need the classic pair."""
+    files = output_files(volume_row, model)
+    return files["seg"], files.get("prob")
 
 
 def cohort_link_paths(work, volume_id, model):
-    pred_dir = os.path.join(work, "cohort", "predictions", model)
-    return (os.path.join(pred_dir, f"{volume_id}.nrrd"),
-            os.path.join(pred_dir, f"{volume_id}-prob.nrrd"))
+    links = model_registry.cohort_link_files(work, volume_id, model)
+    return links["seg"], links.get("prob")
 
 
 def link_volume(work, volume_row, models):
-    """Symlinks for one volume: CT always, predictions when present."""
+    """Symlinks for one volume: CT always, every model output that exists."""
     vid = volume_row["volume_id"]
     n = 0
     n += relink(os.path.join(work, "cohort", "nrrd", f"{vid}_0000.nrrd"), volume_row["ct_path"])
     for model in models:
-        seg, prob = output_paths(volume_row, model)
-        seg_link, prob_link = cohort_link_paths(work, vid, model)
-        if os.path.isfile(seg):
-            n += relink(seg_link, seg)
-        if os.path.isfile(prob):
-            n += relink(prob_link, prob)
+        files = output_files(volume_row, model)
+        links = model_registry.cohort_link_files(work, vid, model)
+        for role, path in files.items():
+            if os.path.isfile(path) and role in links:
+                n += relink(links[role], path)
     return n
 
 
 def pending_volumes(volumes, model):
+    """Volumes still missing at least one of the model's outputs."""
     out = []
     for v in volumes:
-        seg, prob = output_paths(v, model)
-        if not (os.path.isfile(seg) and os.path.isfile(prob)):
+        if not all(os.path.isfile(p) for p in output_files(v, model).values()):
             out.append(v)
     return out
 
@@ -124,7 +128,7 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work", required=True)
     ap.add_argument("--models", required=True,
-                    help="Space- or comma-separated lnq-segmenter model names.")
+                    help="Space- or comma-separated model names (lnq-segmenter registry or models.json).")
     ap.add_argument("--chunk-size", type=int, default=8)
     ap.add_argument("--refresh-links", action="store_true",
                     help="Only redo the symlink sweep + manifests; don't rewrite predict_tasks.tsv.")
@@ -158,6 +162,16 @@ def main(argv=None):
         n_links += link_volume(args.work, v, models)
     for model in models:
         os.makedirs(os.path.join(args.work, "cohort", "predictions", model), exist_ok=True)
+        # External models: keep dataset.json with the manifests so stats /
+        # dashboards on another machine can resolve label names without the
+        # model folder.
+        folder = model_registry.model_folder(model, os.environ.get("MODELS_CACHE", ""))
+        src = os.path.join(folder, "dataset.json") if folder else None
+        if src and os.path.isfile(src):
+            dst_dir = os.path.join(manifest, "models", model)
+            os.makedirs(dst_dir, exist_ok=True)
+            with open(src) as f_in, open(os.path.join(dst_dir, "dataset.json"), "w") as f_out:
+                f_out.write(f_in.read())
     print(f"cohort links created/updated: {n_links}")
 
     if args.refresh_links:

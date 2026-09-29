@@ -17,7 +17,7 @@ ROOT=/vast/lnq
 INPUT=$ROOT/PCCT_exemplary_cases        # rclone'd DICOM studies (read-only to the pipeline)
 WORK=$ROOT/pdac-processing              # everything the pipeline writes
 ENV=$ROOT/env                           # python venv (setup-env.sbatch)
-MODELS_CACHE=$ROOT/models               # LNQ_SEGMENTER_CACHE (weights, ~16 GB for 4 models)
+MODELS_CACHE=$ROOT/models               # LNQ_SEGMENTER_CACHE + external model folders (models.json)
 NNUNET_BASE=$ROOT/nnunet                # dummy nnUNet_raw/preprocessed/results dirs
 
 # Interpreter for the venv. Default "uv:3.11" = a relocatable CPython 3.11
@@ -33,7 +33,11 @@ TORCH_INDEX=https://download.pytorch.org/whl/cu126
 LNQ_SEGMENTER_SPEC="git+https://github.com/pieper/lnq-segmenter.git"
 
 # ---- models -----------------------------------------------------------------
-MODELS="mediastinal-v1 axillary-v1 inguinal-v1 abdominopelvic-v1"
+# lnq-segmenter registry names and/or external nnU-Net folders from mlsc/models.json
+MODELS="mediastinal-v1 axillary-v1 inguinal-v1 abdominopelvic-v1 pants-v1"
+# Models the binary lymph-node QC (bin/idc-batch-qc.py) runs for; external
+# multi-label models (pants-v1) are excluded — PDACReview covers them.
+QC_MODELS="mediastinal-v1 axillary-v1 inguinal-v1 abdominopelvic-v1"
 
 # ---- partitions ---------------------------------------------------------------
 CPU_PARTITION=basic

@@ -1,0 +1,38 @@
+{
+  "_comment": "External (non-lnq-segmenter) models the mlsc pipeline can run. Any model name not listed here is resolved through the lnq-segmenter registry. Paths are relative to $MODELS_CACHE. Label names resolve against the model folder's dataset.json.",
+  "pants-v1": {
+    "kind": "nnunet_folder",
+    "description": "PanTS pancreas / pancreatic-lesion nnU-Net (ResEnc-M, 1 mm iso, 28 labels, region-based)",
+    "hf_repo": "edomerli/nnUNet-PanTS-regions",
+    "folder": "pants/nnUNet-PanTS-regions",
+    "folds": ["all"],
+    "checkpoint": "checkpoint_best.pth",
+    "trainer_shims": {"nnUNetTrainer_onlyMirror01_PanCrop": "nnUNetTrainer_onlyMirror01"},
+    "outputs": {
+      "seg": ".seg.nrrd",
+      "prob": {"pancreatic_lesion": "-prob.nrrd", "pancreas": "-pancreas-prob.nrrd"}
+    },
+    "stats": {
+      "lesion":   {"labels": ["pancreatic_lesion"], "prob": "-prob.nrrd",
+                   "short": "pants lesion",   "color": [255, 30, 30],   "component": "lesion", "default_prob": true},
+      "pancreas": {"labels": ["pancreas"],          "prob": "-pancreas-prob.nrrd",
+                   "short": "pants pancreas", "color": [230, 190, 140], "component": "part",   "default_prob": false}
+    },
+    "segment_colors": {
+      "adrenal_gland_left": [150, 150, 60], "adrenal_gland_right": [150, 150, 60],
+      "aorta": [180, 60, 60], "bladder": [220, 220, 120], "celiac_artery": [200, 120, 100],
+      "colon": [170, 140, 90], "common_bile_duct": [120, 200, 120], "duodenum": [190, 120, 80],
+      "femur_left": [240, 240, 220], "femur_right": [240, 240, 220], "gall_bladder": [90, 180, 90],
+      "kidney_left": [120, 60, 130], "kidney_right": [120, 60, 130], "liver": [150, 90, 60],
+      "lung_left": [200, 200, 240], "lung_right": [200, 200, 240],
+      "pancreas": [230, 190, 140], "pancreas_body": [235, 170, 110], "pancreas_head": [240, 150, 90],
+      "pancreas_tail": [225, 200, 150], "pancreatic_duct": [100, 200, 220],
+      "postcava": [80, 80, 190], "prostate": [180, 150, 180], "spleen": [140, 50, 90],
+      "stomach": [200, 150, 150], "superior_mesenteric_artery": [200, 100, 100], "veins": [60, 60, 200],
+      "pancreatic_lesion": [255, 30, 30]
+    },
+    "visible_segments": ["pancreas", "pancreas_body", "pancreas_head", "pancreas_tail", "pancreatic_duct", "pancreatic_lesion"],
+    "license": "PanTS code + dataset: CC BY-NC-ND 4.0 (research use only); checkpoint card: MIT",
+    "citation": "Li et al., PanTS: The Pancreatic Tumor Segmentation Dataset, NeurIPS 2025; https://github.com/MrGiovanni/PanTS"
+  }
+}

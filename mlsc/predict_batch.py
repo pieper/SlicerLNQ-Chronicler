@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
-"""predict_batch.py — GPU worker: one lnq-segmenter model over a chunk of
-staged volumes, model loaded once, probability maps kept.
+"""predict_batch.py — GPU worker: one model over a chunk of staged volumes,
+model loaded once, probability maps kept.
+
+Two model kinds (see model_registry.py / models.json):
+  * lnq-segmenter registry models — binary lymph-node SEG + one probability
+    map via nnU-Net's stock export (`<model>-seg.nrrd`, `<model>-prob.nrrd`).
+  * external nnU-Net v2 model folders (e.g. pants-v1, 28 labels, 1 mm iso):
+    the volume is written as a temporary .nii.gz so nnU-Net's own reader
+    reorients it exactly as in training, logits are computed at the model's
+    working resolution, converted to labels there, and only the label map and
+    the classes of interest (lesion, pancreas) are resampled back onto the CT
+    grid — nnU-Net's stock export would resample all 28 channels to the
+    original grid (~40 GB for the thin-slice series). Output is a Slicer
+    segmentation NRRD (`<model>.seg.nrrd`, named/colored segments) plus
+    `<model>-prob.nrrd` and `<model>-<class>-prob.nrrd`.
 
 Normal use is one Slurm array task per row of <work>/manifest/predict_tasks.tsv
 (written by build_cohort.py):
@@ -46,7 +59,8 @@ import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_cohort import cohort_link_paths, relink  # noqa: E402
+import model_registry  # noqa: E402
+from build_cohort import relink  # noqa: E402
 
 log = logging.getLogger("predict_batch")
 
@@ -65,7 +79,58 @@ def _rss_mb():
     return round(me, 1), round(kids, 1)
 
 
+def _register_trainer_shims(shims):
+    """Make a checkpoint's custom trainer name resolvable without installing
+    the fork: define `Name(Base)` with no overrides and plant it on the
+    nnunetv2 trainer module so nnU-Net's recursive class lookup finds it.
+    Only valid when the custom trainer changes nothing inference-relevant
+    (true for PanTS: it only overrides get_dataloaders)."""
+    import nnunetv2
+    import nnunetv2.training.nnUNetTrainer.nnUNetTrainer as base_mod
+    from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
+    folder = os.path.join(nnunetv2.__path__[0], "training", "nnUNetTrainer")
+    for name, base_name in (shims or {}).items():
+        if hasattr(base_mod, name):
+            continue
+        base = recursive_find_python_class(folder, base_name, "nnunetv2.training.nnUNetTrainer")
+        if base is None:
+            raise RuntimeError(f"trainer shim base {base_name!r} not found in nnunetv2")
+        setattr(base_mod, name, type(name, (base,), {"__module__": base_mod.__name__}))
+        log.info("registered trainer shim %s(%s)", name, base_name)
+
+
+def load_folder_predictor(model_name, spec, device="cuda", folds=None):
+    """External nnU-Net v2 model folder (dataset.json + plans.json + fold_*/)."""
+    import torch
+    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+    cache = os.environ.get("LNQ_SEGMENTER_CACHE") or os.path.expanduser("~/.cache/lnq-segmenter")
+    folder = os.environ.get("MLSC_MODEL_DIR_" + model_name.upper().replace("-", "_")) \
+        or model_registry.model_folder(model_name, os.environ.get("MODELS_CACHE", cache))
+    use_folds = tuple(folds) if folds else tuple(spec.get("folds", ["all"]))
+    checkpoint = spec.get("checkpoint", "checkpoint_final.pth")
+    for f in use_folds:
+        ck = os.path.join(folder, f"fold_{f}", checkpoint)
+        if not os.path.isfile(ck):
+            raise FileNotFoundError(f"{ck} missing — run setup-env (hf download {spec.get('hf_repo')})")
+    _register_trainer_shims(spec.get("trainer_shims"))
+    t0 = time.time()
+    predictor = nnUNetPredictor(
+        tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
+        perform_everything_on_device=True, device=torch.device(device),
+        verbose=False, verbose_preprocessing=False, allow_tqdm=False)
+    predictor.initialize_from_trained_model_folder(folder, use_folds=use_folds, checkpoint_name=checkpoint)
+    predictor._mlsc_model_folder = folder
+    entry = {"name": model_name, "version": spec.get("version", "hf:" + spec.get("hf_repo", "?")),
+             "folds": list(use_folds), "folder": folder}
+    log.info("loaded %s (%s) folds=%s trainer=%s from %s in %.1fs", model_name, spec["kind"],
+             list(use_folds), predictor.trainer_name, folder, time.time() - t0)
+    return predictor, entry
+
+
 def load_predictor(model_name, device="cuda", folds=None):
+    spec = model_registry.spec(model_name)
+    if spec is not None:
+        return load_folder_predictor(model_name, spec, device=device, folds=folds)
     from lnq_segmenter import registry, cache as _cache
     from lnq_segmenter.predict import _ensure_nnunet_layout
     import torch
@@ -140,6 +205,120 @@ def predict_volume(predictor, ct_path, seg_path, prob_path, tmp_root, n_procs):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _channel_index(label_manager, values):
+    """Index of the output channel for a class given its label values
+    (region tuple or single label)."""
+    wanted = tuple(sorted(int(v) for v in values))
+    if label_manager.has_regions:
+        for i, r in enumerate(label_manager.foreground_regions):
+            rr = tuple(sorted(r)) if isinstance(r, (tuple, list)) else (int(r),)
+            if rr == wanted:
+                return i
+        raise KeyError(f"no output region with labels {wanted}")
+    if len(wanted) != 1:
+        raise KeyError("softmax model: a class must be a single label")
+    return list(label_manager.all_labels).index(wanted[0])
+
+
+def predict_volume_multiclass(predictor, model, spec, ct_path, out_files, tmp_root):
+    """External multi-label model: preprocess with nnU-Net's own reader
+    (reorientation!), predict logits at the working resolution, convert to
+    labels there, resample label map + selected probabilities to the CT grid."""
+    import numpy as np
+    import torch
+    import SimpleITK as sitk
+    import nibabel as nib
+
+    tmp_dir = tempfile.mkdtemp(prefix="mlsc-", dir=tmp_root)
+    try:
+        t0 = time.time()
+        ct = sitk.ReadImage(ct_path)
+        nii = os.path.join(tmp_dir, "img_0000.nii.gz")
+        sitk.WriteImage(ct, nii)
+        pm, cm, dj = predictor.plans_manager, predictor.configuration_manager, predictor.dataset_json
+        if list(pm.transpose_forward) != [0, 1, 2]:
+            raise RuntimeError(f"transpose_forward {pm.transpose_forward} not supported")
+        preprocessor = cm.preprocessor_class(verbose=False)
+        data, _, props = preprocessor.run_case([nii], None, pm, cm, dj)
+        t_pre = time.time() - t0
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        t1 = time.time()
+        logits = predictor.predict_logits_from_preprocessed_data(torch.from_numpy(data))   # (C, z, y, x), cpu
+        t_pred = time.time() - t1
+        del data
+        lm = predictor.label_manager
+        # labels at the working resolution, channel by channel (no full softmax array)
+        t2 = time.time()
+        seg = np.zeros(tuple(logits.shape[1:]), dtype=np.uint8)
+        if lm.has_regions:
+            for i, c in enumerate(lm.regions_class_order):
+                seg[(logits[i] > 0).numpy()] = int(c)          # sigmoid(x) > 0.5  <=>  x > 0
+        else:
+            probs = lm.apply_inference_nonlin(logits)
+            seg = lm.convert_probabilities_to_segmentation(probs).numpy().astype(np.uint8)
+            del probs
+        dataset_labels = model_registry.read_dataset_labels(entry_folder(predictor))
+        prob_arrays = {}
+        for cls, suffix in spec["outputs"]["prob"].items():
+            idx = _channel_index(lm, dataset_labels[cls])
+            ch = logits[idx].float()
+            prob_arrays[cls] = (torch.sigmoid(ch) if lm.has_regions else ch).numpy().astype(np.float32)
+        del logits
+        # geometry: nnU-Net array (z,y,x) of the cropped + resampled reoriented image
+        affine = np.asarray(props["nibabel_stuff"]["reoriented_affine"], dtype=float)
+        bbox = props["bbox_used_for_cropping"]
+        shape_c = props["shape_after_cropping_and_before_resampling"]
+        M = np.eye(4)
+        for a in range(3):                      # a: nnU-Net axis (0=z,1=y,2=x) -> nibabel axis 2-a
+            ratio = float(shape_c[a]) / float(seg.shape[a])
+            na = 2 - a
+            M[na, na] = ratio
+            M[na, 3] = float(bbox[a][0]) - 0.5 + 0.5 * ratio     # align_corners=False / grid_mode=True
+        affine_new = affine @ M
+
+        def to_ct_grid(arr, interpolator, pixel_type):
+            path = os.path.join(tmp_dir, "tmp.nii.gz")
+            nib.save(nib.Nifti1Image(np.ascontiguousarray(arr.transpose(2, 1, 0)), affine_new), path)
+            img = sitk.ReadImage(path)
+            return sitk.Resample(img, ct, sitk.Transform(), interpolator, 0.0, pixel_type)
+
+        seg_ct = to_ct_grid(seg, sitk.sitkNearestNeighbor, sitk.sitkUInt8)
+        names = model_registry.label_value_names(dataset_labels)
+        colors = spec.get("segment_colors", {})
+        seg_tmp = os.path.join(tmp_dir, "seg.seg.nrrd")
+        n_segments = model_registry.write_slicer_seg_nrrd(seg_ct, seg_tmp, names, colors)
+        _move(seg_tmp, out_files["seg"])
+        counts = {}
+        seg_arr = sitk.GetArrayViewFromImage(seg_ct)
+        for cls in spec["outputs"]["prob"]:
+            counts[cls] = int(np.isin(seg_arr, dataset_labels[cls]).sum())
+        for cls, suffix in spec["outputs"]["prob"].items():
+            role = "prob" if suffix == "-prob.nrrd" else suffix[1:-len(".nrrd")]
+            img = to_ct_grid(prob_arrays[cls], sitk.sitkLinear, sitk.sitkFloat32)
+            p_tmp = os.path.join(tmp_dir, role + ".nrrd")
+            sitk.WriteImage(img, p_tmp, useCompression=True)
+            _move(p_tmp, out_files[role])
+        t_export = time.time() - t2
+        gpu_alloc = gpu_reserved = None
+        if torch.cuda.is_available():
+            gpu_alloc = round(torch.cuda.max_memory_allocated() / 2**20)
+            gpu_reserved = round(torch.cuda.max_memory_reserved() / 2**20)
+        return {"predict_seconds": round(t_pred, 1), "preprocess_seconds": round(t_pre, 1),
+                "export_seconds": round(t_export, 1), "total_seconds": round(time.time() - t0, 1),
+                "working_shape": list(seg.shape), "n_segments": n_segments,
+                "class_voxels": counts,
+                "gpu_peak_alloc_mb": gpu_alloc, "gpu_peak_reserved_mb": gpu_reserved,
+                "cpu_fallback": False}
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def entry_folder(predictor):
+    """Model folder the predictor was initialized from (stashed by load_folder_predictor)."""
+    return getattr(predictor, "_mlsc_model_folder")
+
+
 def _read_tasks(path):
     with open(path, newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
@@ -183,18 +362,19 @@ def run(work, model, volumes, device, n_procs, tmp_root, jsonl_path, bench_out=N
     predictor, entry = load_predictor(model, device=device, folds=folds)
     load_seconds = round(time.time() - t_load, 1)
 
+    spec = model_registry.spec(model)
     records = []
     n_ok = n_skip = n_fail = 0
     with open(jsonl_path, "a") as jf:
         for i, (vid, ct_path) in enumerate(volumes, 1):
             vol_dir = os.path.dirname(ct_path)
-            seg_path = os.path.join(vol_dir, f"{model}-seg.nrrd")
-            prob_path = os.path.join(vol_dir, f"{model}-prob.nrrd")
+            out_files = model_registry.output_files(vol_dir, model)
+            seg_path, prob_path = out_files["seg"], out_files.get("prob")
             rec = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                    "host": host, "gpu": gpu_name, "partition": job.get("SLURM_JOB_PARTITION"),
                    "job_id": job.get("SLURM_JOB_ID"), "model": model,
                    "model_version": entry["version"], "volume_id": vid, "ct_path": ct_path}
-            if skip_existing and os.path.isfile(seg_path) and os.path.isfile(prob_path):
+            if skip_existing and all(os.path.isfile(p) for p in out_files.values()):
                 rec["status"] = "skipped"
                 n_skip += 1
                 log.info("[%d/%d] %s: skip (outputs exist)", i, len(volumes), vid)
@@ -211,11 +391,14 @@ def run(work, model, volumes, device, n_procs, tmp_root, jsonl_path, bench_out=N
                     size = hdr.GetSize()
                     rec["size_xyz"] = list(size)
                     rec["n_voxels"] = int(size[0] * size[1] * size[2])
-                    metrics = predict_volume(predictor, ct_path, seg_path, prob_path, tmp_root, n_procs)
+                    if spec is not None:
+                        metrics = predict_volume_multiclass(predictor, model, spec, ct_path, out_files, tmp_root)
+                    else:
+                        metrics = predict_volume(predictor, ct_path, seg_path, prob_path, tmp_root, n_procs)
                     rec.update(metrics)
-                    seg_link, prob_link = cohort_link_paths(work, vid, model)
-                    relink(seg_link, seg_path)
-                    relink(prob_link, prob_path)
+                    for role, link in model_registry.cohort_link_files(work, vid, model).items():
+                        if role in out_files and os.path.isfile(out_files[role]):
+                            relink(link, out_files[role])
                     rec["status"] = "ok"
                     n_ok += 1
                     log.info("[%d/%d] %s: ok %.0fs gpu_peak=%sMB fallback=%s", i, len(volumes), vid,
@@ -226,9 +409,9 @@ def run(work, model, volumes, device, n_procs, tmp_root, jsonl_path, bench_out=N
                                traceback=traceback.format_exc()[-4000:])
                     n_fail += 1
                     log.error("[%d/%d] %s: FAIL %s", i, len(volumes), vid, exc)
-                    for p in (seg_path + ".partial", prob_path + ".partial"):
-                        if os.path.exists(p):
-                            os.remove(p)
+                    for p in out_files.values():
+                        if os.path.exists(p + ".partial"):
+                            os.remove(p + ".partial")
             rec["rss_self_mb"], rec["rss_children_mb"] = _rss_mb()
             records.append(rec)
             jf.write(json.dumps(rec) + "\n")

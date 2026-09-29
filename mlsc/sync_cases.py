@@ -137,12 +137,20 @@ def main(argv=None):
     ap.add_argument("--first", type=int, default=None, help="Only the first N cases (in order).")
     ap.add_argument("--transfers", type=int, default=8)
     ap.add_argument("--status", action="store_true", help="Print the table and exit; no transfer.")
-    ap.add_argument("--models", default="mediastinal-v1 axillary-v1 inguinal-v1 abdominopelvic-v1",
-                    help="For rebuilding cohort links after each pulled case.")
+    ap.add_argument("--models", default=None,
+                    help="For rebuilding cohort links after each pulled case "
+                         "(default: MODELS from <work>/mlsc.conf, else the lnq four + pants-v1).")
     args = ap.parse_args(argv)
 
     push = args.push
     remote = args.remote.rstrip("/")
+    if not args.models:
+        args.models = "mediastinal-v1 axillary-v1 inguinal-v1 abdominopelvic-v1 pants-v1"
+        conf = os.path.join(args.work, "mlsc.conf")
+        if os.path.isfile(conf):
+            for line in open(conf):
+                if line.startswith("MODELS="):
+                    args.models = line.split("=", 1)[1].strip().strip('"')
     state_path = os.path.join(args.work, "manifest", f"sync-{'push' if push else 'pull'}.json")
     state = load_state(state_path)
 

@@ -10,11 +10,16 @@ What it shows (Apache ECharts inside a qSlicerWebWidget):
     median segmented lymph-node volume per model across that study's series,
     with min / max, coefficient of variation and node counts in the tooltip
     and in the table below. Click a study to drill in.
-  * Study — every axial series of that study side by side: total mL and node
-    count per model, the series' phase / spectral kind / thickness / fraction
-    of interpolated slices, the per-model agreement across series (CV, range),
-    and per-series node lists. "Load" opens the series in this Slicer: CT +
-    one segmentation per model (registry colors) + one probability map.
+  * Study — every axial series of that study side by side: total mL and
+    component count per model row, the series' phase / spectral kind /
+    thickness / fraction of interpolated slices, the per-row agreement across
+    series (CV, range), and per-series component lists. "Load" opens the
+    series in this Slicer: CT + one segmentation per model (binary lnq models
+    in registry colors; multi-label models such as PanTS as their own
+    .seg.nrrd with named segments) + one probability map.
+
+Rows are *stats keys* from mlsc/model_registry.py: one per lnq model, one per
+class of an external model (pants-v1/lesion, pants-v1/pancreas).
   * Geometry issues — every series whose staging flagged a geometry problem
     (missing / interpolated slices, irregular spacing, …), with Load buttons
     and a Copy button; also written to manifest/geometry_issues.csv.
@@ -46,17 +51,7 @@ from slicer.ScriptedLoadableModule import (ScriptedLoadableModule, ScriptedLoada
 MLSC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if MLSC_DIR not in sys.path:
     sys.path.insert(0, MLSC_DIR)
-
-# Registry colors (lnq-segmenter/_registry.json) so the dashboard and the
-# segmentations in the scene agree.
-MODEL_COLORS = {
-    "mediastinal-v1":    (200, 100, 230),
-    "abdominopelvic-v1": (120, 220, 120),
-    "axillary-v1":       (255, 150, 100),
-    "inguinal-v1":       (240, 220, 60),
-}
-MODEL_SHORT = {"mediastinal-v1": "mediastinal", "abdominopelvic-v1": "abd/pelvic",
-               "axillary-v1": "axillary", "inguinal-v1": "inguinal"}
+import model_registry  # noqa: E402
 
 # Log-scaled threshold slider, same range as LNQReview's ThresholdController.
 LOG_MIN, LOG_MAX, SLIDER_TICKS = -5.0, 0.0, 1000
@@ -138,6 +133,18 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
             return []
         return [v for v in self.stats["volumes"] if v.get("flags")]
 
+    def keys(self):
+        return list((self.stats or {}).get("models", []))
+
+    def display(self, key):
+        """short / color / component / default_prob for a stats key."""
+        d = (self.stats or {}).get("display", {}).get(key)
+        if d:
+            return d
+        lnq = model_registry.LNQ_DISPLAY.get(key, {"short": key, "color": [150, 150, 150]})
+        return {"model": key, "short": lnq["short"], "color": lnq["color"], "component": "node",
+                "default_prob": True, "label_values": None}
+
     # ---- scene -----------------------------------------------------------
     def clearScene(self):
         self.probVRDisplayNode = None
@@ -150,16 +157,21 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
                 slicer.mrmlScene.RemoveNode(n)
 
     def defaultProbModel(self, rec):
-        """Model with the largest segmentation in this series (ties → first
-        in the stats' model order); falls back to the first with a map."""
+        """Key with the largest segmentation among the 'detection' rows
+        (display.default_prob, i.e. lymph nodes and lesions — not organs such
+        as the PanTS pancreas); ties → stats order; falls back to any map."""
         best, best_ml = None, -1.0
-        for m in self.stats["models"]:
-            e = rec["models"].get(m)
+        fallback = None
+        for k in self.keys():
+            e = rec["models"].get(k)
             if not e or not e.get("prob_path"):
                 continue
+            fallback = fallback or k
+            if not self.display(k).get("default_prob", True):
+                continue
             if e.get("total_ml", 0) > best_ml:
-                best, best_ml = m, e.get("total_ml", 0)
-        return best
+                best, best_ml = k, e.get("total_ml", 0)
+        return best or fallback
 
     def loadSeries(self, volume_id, prob_model=None):
         """Load one series: CT + SEG per model + the chosen probability map."""
@@ -179,22 +191,43 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
             disp.SetAutoWindowLevel(False)
             disp.SetWindowLevel(400, 40)
         self.ctNode = ct
-        for m in self.stats["models"]:
-            entry = rec["models"].get(m)
+        loaded_segs = {}                       # seg_path -> node (multi-label files load once)
+        for k in self.keys():
+            entry = rec["models"].get(k)
             if not entry or not os.path.isfile(entry.get("seg_path", "")):
                 continue
-            if entry.get("n_voxels", 0) == 0:
-                continue      # empty labelmap → nothing to show
-            node = slicer.util.loadSegmentation(entry["seg_path"])
+            disp = self.display(k)
+            seg_path = entry["seg_path"]
+            if seg_path in loaded_segs:
+                self.segNodes[k] = loaded_segs[seg_path]
+                continue
+            if entry.get("label_values") is None and entry.get("n_voxels", 0) == 0:
+                continue      # empty binary labelmap → nothing to show
+            node = slicer.util.loadSegmentation(seg_path)
             if node is None:
                 continue
-            node.SetName(f"PDAC:{m}")
+            loaded_segs[seg_path] = node
             segmentation = node.GetSegmentation()
-            color = tuple(c / 255.0 for c in MODEL_COLORS.get(m, (150, 150, 150)))
-            if segmentation.GetNumberOfSegments():
-                s = segmentation.GetSegment(segmentation.GetNthSegmentID(0))
-                s.SetName(f"{MODEL_SHORT.get(m, m)} ({entry['n_nodes']} nodes, {entry['total_ml']} mL)")
-                s.SetColor(*color)
+            model = disp.get("model", k)
+            node.SetName(f"PDAC:{model}")
+            if entry.get("label_values") is None:
+                # binary lnq model: one segment, registry color, descriptive name
+                color = tuple(c / 255.0 for c in disp["color"])
+                if segmentation.GetNumberOfSegments():
+                    s = segmentation.GetSegment(segmentation.GetNthSegmentID(0))
+                    s.SetName(f"{disp['short']} ({entry['n_nodes']} {disp['component']}s, {entry['total_ml']} mL)")
+                    s.SetColor(*color)
+            else:
+                # multi-label .seg.nrrd: names/colors come from the file; show
+                # only the model's 'visible_segments' by default
+                spec = model_registry.spec(model) or {}
+                visible = set(spec.get("visible_segments") or [])
+                d = node.GetDisplayNode()
+                if visible and d is not None:
+                    for i in range(segmentation.GetNumberOfSegments()):
+                        sid = segmentation.GetNthSegmentID(i)
+                        on = segmentation.GetSegment(sid).GetName() in visible
+                        d.SetSegmentVisibility(sid, on)
             d = node.GetDisplayNode()
             if d is not None:
                 d.SetVisibility2DFill(True)
@@ -205,8 +238,8 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
             try:
                 node.CreateClosedSurfaceRepresentation()
             except Exception as exc:  # noqa: BLE001
-                logging.warning("closed surface for %s: %s", m, exc)
-            self.segNodes[m] = node
+                logging.warning("closed surface for %s: %s", k, exc)
+            self.segNodes[k] = node
         layoutManager = slicer.app.layoutManager()
         for color in ("Red", "Yellow", "Green"):
             sw = layoutManager.sliceWidget(color)
@@ -220,7 +253,7 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
         self.setProbabilityModel(prob_model or self.defaultProbModel(rec))
         # Jump slices to the largest node of the displayed model (or the
         # first model that has one).
-        order = [self.probModel] + [m for m in self.stats["models"] if m != self.probModel]
+        order = [self.probModel] + [m for m in self.keys() if m != self.probModel]
         for m in order:
             nodes = (rec["models"].get(m) or {}).get("nodes") or []
             if nodes:
@@ -254,7 +287,7 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
         node = slicer.util.loadVolume(path, properties={"show": False})
         if node is None:
             return None
-        node.SetName(f"PDAC:{model}-prob")
+        node.SetName(f"PDAC:{model.replace('/', '-')}-prob")
         self.probNode = node
         heat = slicer.util.getFirstNodeByName("Inferno")
         d = node.GetDisplayNode()
@@ -395,8 +428,8 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
         row = qt.QHBoxLayout()
         row.addWidget(qt.QLabel("Show:"))
         self.probCombo = qt.QComboBox()
-        self.probCombo.setToolTip("Which model's probability map to display (one at a time; "
-                                  "default = largest segmentation in this series).")
+        self.probCombo.setToolTip("Which probability map to display (one at a time; default = the "
+                                  "largest lymph-node / lesion segmentation in this series).")
         row.addWidget(self.probCombo, 1)
         pl.addLayout(row)
         row = qt.QHBoxLayout()
@@ -529,10 +562,11 @@ class PDACReviewWidget(ScriptedLoadableModuleWidget):
         self._updatingCombo = True
         try:
             self.probCombo.clear()
-            for m in self.logic.stats["models"]:
-                e = rec["models"].get(m)
+            for k in self.logic.keys():
+                e = rec["models"].get(k)
                 if e and e.get("prob_path"):
-                    self.probCombo.addItem(f"{MODEL_SHORT.get(m, m)}  ({e['total_ml']} mL, {e['n_nodes']} nodes)", m)
+                    d = self.logic.display(k)
+                    self.probCombo.addItem(f"{d['short']}  ({e['total_ml']} mL, {e['n_nodes']} {d['component']}s)", k)
             for i in range(self.probCombo.count):
                 if self.probCombo.itemData(i) == self.logic.probModel:
                     self.probCombo.setCurrentIndex(i)
@@ -585,14 +619,23 @@ def _slim_volume(v):
     return out
 
 
+def _display(stats, key):
+    d = stats.get("display", {}).get(key)
+    if d:
+        return d
+    lnq = model_registry.LNQ_DISPLAY.get(key, {"short": key, "color": [150, 150, 150]})
+    return {"short": lnq["short"], "color": lnq["color"], "component": "node"}
+
+
 def build_dashboard_html(stats):
     data = {
         "generated_at": stats.get("generated_at"),
         "min_node_ml": stats.get("min_node_ml"),
         "root": stats.get("root"),
         "models": stats["models"],
-        "colors": {m: "rgb(%d,%d,%d)" % MODEL_COLORS.get(m, (150, 150, 150)) for m in stats["models"]},
-        "short": {m: MODEL_SHORT.get(m, m) for m in stats["models"]},
+        "colors": {m: "rgb(%d,%d,%d)" % tuple(_display(stats, m)["color"]) for m in stats["models"]},
+        "short": {m: _display(stats, m)["short"] for m in stats["models"]},
+        "component": {m: _display(stats, m)["component"] for m in stats["models"]},
         "studies": stats["studies"],
         "volumes": [_slim_volume(v) for v in stats["volumes"]],
     }
@@ -721,7 +764,7 @@ function renderOverview() {
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: ps => {
       const r = rows[ps[0].dataIndex]; let s = `<b>${r.patient}</b> day ${r.day} · ${r.case_id} · ${r.n} series<br>`;
       for (const p of ps) { const m = p.seriesId, x = r.models[m]; if (!x) continue;
-        s += `${p.marker}${D.short[m]}: median ${fmt(x.median_ml)} mL [${fmt(x.min_ml)}–${fmt(x.max_ml)}], CV ${pct(x.cv_ml)}, nodes ${x.median_nodes} [${x.min_nodes}–${x.max_nodes}]<br>`; }
+        s += `${p.marker}${D.short[m]}: median ${fmt(x.median_ml)} mL [${fmt(x.min_ml)}–${fmt(x.max_ml)}], CV ${pct(x.cv_ml)}, ${D.component[m]}s ${x.median_nodes} [${x.min_nodes}–${x.max_nodes}]<br>`; }
       return s; } },
     legend: { bottom: 0, data: activeModels().map(m => D.short[m]) },
     grid: { left: 50, right: 16, top: 30, bottom: 70 },
@@ -730,12 +773,12 @@ function renderOverview() {
     series: activeModels().map(m => ({ id: m, name: D.short[m], type: "bar", itemStyle: { color: D.colors[m] },
       data: rows.map(r => r.models[m] ? r.models[m][key] : null) })),
   });
-  const c1 = mkChart(document.getElementById("c1"), mk("median_ml", "Median segmented lymph-node volume per study", "mL"));
-  const c2 = mkChart(document.getElementById("c2"), mk("median_nodes", "Median node count per study", "nodes"));
+  const c1 = mkChart(document.getElementById("c1"), mk("median_ml", "Median segmented volume per study", "mL"));
+  const c2 = mkChart(document.getElementById("c2"), mk("median_nodes", "Median component count per study (nodes / lesions / parts)", "count"));
   const go = p => { if (p.componentType === "series") openStudy(rows[p.dataIndex].case_id); };
   c1.on("click", go); c2.on("click", go);
   let h = `<table><tr><th class="left">patient</th><th>day</th><th class="left">study</th><th>series</th>`;
-  for (const m of activeModels()) h += `<th><span class="swatch" style="background:${D.colors[m]}"></span>${D.short[m]} mL (min–max)</th><th>nodes</th>`;
+  for (const m of activeModels()) h += `<th><span class="swatch" style="background:${D.colors[m]}"></span>${D.short[m]} mL (min–max)</th><th>${D.component[m]}s</th>`;
   h += `</tr>`;
   for (const r of rows) {
     h += `<tr class="clickable" data-case="${r.case_id}"><td class="left">${r.patient}</td><td>${r.day}</td><td class="left">${r.case_id}</td><td>${r.n}</td>`;
@@ -772,10 +815,10 @@ function renderStudy() {
       data: vols.map(v => v.models[m] ? v.models[m][key] : null) })),
   });
   const c1 = mkChart(document.getElementById("c1"), mk("total_ml", "Segmented volume per series", "mL"));
-  const c2 = mkChart(document.getElementById("c2"), mk("n_nodes", "Node count per series", "nodes"));
+  const c2 = mkChart(document.getElementById("c2"), mk("n_nodes", "Component count per series", "count"));
   const go = p => { if (p.componentType === "series") loadInSlicer(vols[p.dataIndex].volume_id, p.seriesId); };
   c1.on("click", go); c2.on("click", go);
-  let a = `<table class="agree"><tr><th class="left">agreement across ${vols.length} series</th><th>median mL</th><th>min</th><th>max</th><th>CV mL</th><th>median nodes</th><th>min</th><th>max</th><th>CV nodes</th></tr>`;
+  let a = `<table class="agree"><tr><th class="left">agreement across ${vols.length} series</th><th>median mL</th><th>min</th><th>max</th><th>CV mL</th><th>median count</th><th>min</th><th>max</th><th>CV count</th></tr>`;
   for (const m of activeModels()) {
     const ml = vols.filter(v => v.models[m]).map(v => v.models[m].total_ml), nn = vols.filter(v => v.models[m]).map(v => v.models[m].n_nodes);
     if (!ml.length) continue;
@@ -784,7 +827,7 @@ function renderStudy() {
   a += `</table>`;
   document.getElementById("agree").innerHTML = a;
   let h = `<table><tr><th></th><th>#</th><th class="left">series</th><th>phase</th><th>kind</th><th>thk</th><th>slices</th><th>interp.</th>`;
-  for (const m of activeModels()) h += `<th><span class="swatch" style="background:${D.colors[m]}"></span>${D.short[m]} mL</th><th>nodes</th><th>largest</th>`;
+  for (const m of activeModels()) h += `<th><span class="swatch" style="background:${D.colors[m]}"></span>${D.short[m]} mL</th><th>${D.component[m]}s</th><th>largest</th>`;
   h += `</tr>`;
   for (const v of vols) {
     h += `<tr><td>${loadButton(v)}</td><td>${v.series_number}</td><td class="left" title="${v.flags}">${v.series_description}${v.flags ? ' <span class="warn" title="' + v.flags + '">⚠</span>' : ""}</td><td>${v.phase}</td><td>${v.spectral}</td><td>${v.slice_thickness_mm}</td><td>${v.n_slices}</td><td class="${v.missing_frac > 0.25 ? "warn" : ""}">${v.missing_frac ? pct(v.missing_frac) : ""}</td>`;
@@ -830,7 +873,7 @@ function loadInSlicer(vid, model) {
 
 function render() {
   disposeCharts();
-  document.getElementById("meta").textContent = `${D.studies.length} studies · ${D.volumes.length} volumes · nodes ≥ ${D.min_node_ml} mL · ${D.generated_at}`;
+  document.getElementById("meta").textContent = `${D.studies.length} studies · ${D.volumes.length} volumes · components ≥ ${D.min_node_ml} mL · ${D.generated_at}`;
   const gb = document.getElementById("geomBtn");
   gb.textContent = `⚠ Geometry issues (${issues.length})`;
   gb.onclick = () => { state.view = "geometry"; render(); };
