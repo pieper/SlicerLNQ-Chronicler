@@ -54,7 +54,8 @@ def sh(args, stream=True):
 def rclone_copy(src, dst, extra=(), transfers=8, stats="30s"):
     args = ["rclone", "copy", "--skip-links", "--transfers", str(transfers), "--checkers", "16",
             "--dropbox-chunk-size", "128M", "--stats", stats, "--stats-one-line",
-            "--stats-log-level", "NOTICE", *extra, src, dst]
+            "--stats-log-level", "NOTICE", "--exclude", ".DS_Store", "--exclude", "._*",
+            *extra, src, dst]
     return sh(args)
 
 
