@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/modelgeneration.schema.json",
+  "title": "ModelGeneration",
+  "description": "A single trained model. Records the training-set Annotations that defined the truth, where the weights file lives, and enough provenance (framework, hardware, git SHA) to reproduce the run. Subsequent generations reference earlier ones via predecessor when they're refinements (retro2 of retro1, etc.).",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "project_id", "label", "training_annotation_ids", "weights_ref"],
+      "properties": {
+        "type": { "const": "ModelGeneration" },
+        "_id": { "pattern": "^modelgeneration:" },
+
+        "project_id": {
+          "type": "string",
+          "pattern": "^project:",
+          "description": "The Project under which this model was trained (binds Cohort + Protocol)."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable identifier for this generation, e.g. 'inguinal-retro1', 'retro6'. Used as the producer.label on Annotations created by InferenceRuns of this model."
+        },
+        "training_annotation_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^annotation:" },
+          "description": "The Annotation documents that defined the training set. These are the head-of-chain approved annotations at the time of training; freezing them here makes the run reproducible."
+        },
+        "weights_ref": {
+          "type": "object",
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["local-uri", "swift", "https"] },
+            "value": { "type": "string", "minLength": 1 },
+            "sha256": { "type": ["string", "null"] },
+            "size": { "type": ["integer", "null"] }
+          },
+          "description": "Where the trained weights live (filesystem path, Swift bucket, or HTTPS URL)."
+        },
+
+        "framework": {
+          "type": ["string", "null"],
+          "description": "Training framework; conventionally 'nnUNetv2' for the LNQ retros."
+        },
+        "training_log_ref": {
+          "type": ["object", "null"],
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["local-uri", "swift", "https"] },
+            "value": { "type": "string", "minLength": 1 }
+          }
+        },
+        "hardware": {
+          "type": ["object", "null"],
+          "description": "Free-form hardware fingerprint: gpu, gpu_count, host, instance type, etc."
+        },
+        "software": {
+          "type": ["object", "null"],
+          "description": "Free-form software fingerprint: python version, package versions, git_sha, container image hash."
+        },
+        "training_started_at": { "type": ["string", "null"], "format": "date-time" },
+        "training_finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": ["string", "null"] }
+      }
+    }
+  ]
+}

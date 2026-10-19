@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/cohortresolution.schema.json",
+  "title": "CohortResolution",
+  "description": "A frozen list of cases that match a Cohort's selection criteria at a point in time. Cohort holds intent; CohortResolution holds the snapshot. Multiple Resolutions over time are expected as new studies match the criteria; each Resolution is immutable once written. The 'latest' Resolution for a cohort is found by Mango/view query.",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "cohort_id", "resolved_at", "cases"],
+      "properties": {
+        "type": { "const": "CohortResolution" },
+        "_id": { "pattern": "^cohortresolution:" },
+        "cohort_id": {
+          "type": "string",
+          "pattern": "^cohort:",
+          "description": "Reference to the Cohort this resolution snapshots."
+        },
+        "resolved_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the resolution was produced (may differ from created_at if the resolver ran asynchronously)."
+        },
+        "resolver": {
+          "type": "string",
+          "description": "Identifier of the agent or import process that produced this resolution. e.g. 'lnq-retro-import-v1' or 'cohort-resolver-agent-v0'."
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 0,
+          "description": "Frozen list of cases. Order is preserved (used for default worklist order).",
+          "items": {
+            "type": "object",
+            "required": ["case_id"],
+            "properties": {
+              "case_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Identifier of the case within this cohort. For DICOM cohorts, conventionally the StudyInstanceUID; for file-based cohorts, a project-local identifier like 'case_0042'."
+              },
+              "study_uid": {
+                "type": ["string", "null"],
+                "description": "DICOM Study Instance UID when known."
+              },
+              "series_uid": {
+                "type": ["string", "null"],
+                "description": "DICOM Series Instance UID when applicable."
+              },
+              "patient_id": {
+                "type": ["string", "null"],
+                "description": "DICOM Patient ID when known."
+              },
+              "primary_site": {
+                "type": ["string", "null"],
+                "description": "Anatomic / disease site label, drawn from clinical metadata. Free text."
+              },
+              "sex": {
+                "type": ["string", "null"],
+                "description": "Patient sex code (F/M/O/U) when known."
+              },
+              "ct_ref": {
+                "type": ["object", "null"],
+                "description": "Reference to the primary CT/MR/PT volume for this case.",
+                "required": ["kind", "value"],
+                "properties": {
+                  "kind": { "type": "string", "enum": ["local-uri", "dicomweb"] },
+                  "value": { "type": "string", "minLength": 1 },
+                  "sha256": { "type": ["string", "null"] },
+                  "size": { "type": ["integer", "null"] }
+                },
+                "additionalProperties": false
+              },
+              "metadata": {
+                "type": "object",
+                "description": "Free-form per-case metadata: anything from the source CSV that doesn't fit the named fields above (training-case flag, tumour stage, scanner info, etc.)."
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/project.schema.json",
+  "title": "Project",
+  "description": "A working session that binds a Cohort to a Protocol and assigns user roles. Annotations and InferenceRuns reference a Project for context. Projects are versioned the same way as other documents — to add a member, write a new Project document with predecessor pointing at the old one.",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "cohort_id", "protocol_id", "members"],
+      "properties": {
+        "type": { "const": "Project" },
+        "_id": { "pattern": "^project:" },
+        "description": {
+          "type": "string",
+          "description": "Markdown description: research goal, principal investigator, any LNQ-team-specific context."
+        },
+        "cohort_id": {
+          "type": "string",
+          "pattern": "^cohort:",
+          "description": "Reference to a Cohort document. Projects pin a specific Cohort version; if the cohort is re-versioned, the Project must also be re-versioned to follow."
+        },
+        "protocol_id": {
+          "type": "string",
+          "pattern": "^protocol:",
+          "description": "Reference to a Protocol document. Same versioning discipline as cohort_id."
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Project membership. At least one member must have role 'admin'.",
+          "items": {
+            "type": "object",
+            "required": ["user", "role"],
+            "properties": {
+              "user": {
+                "type": "string",
+                "minLength": 1,
+                "description": "CouchDB username (phase 2a) or OIDC subject (phase 2b)."
+              },
+              "role": {
+                "type": "string",
+                "enum": ["admin", "annotator", "reviewer"],
+                "description": "admin: can re-version the project, manage membership. annotator: can write Annotations against this project. reviewer: can write ComparisonReports and Comments referencing this project."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ]
+}

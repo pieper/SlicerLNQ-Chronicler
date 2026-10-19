@@ -32,7 +32,7 @@ SSH_USER=ubuntu
 DOMAIN_NAME=lnq-chronicle.isomics.dev
 # Reserve this in advance: `openstack floating ip create public`.
 # A record for $DOMAIN_NAME must point at $FLOATING_IP.
-FLOATING_IP=149.165.154.240
+FLOATING_IP=fill-in-from-floating-ip-list
 LETSENCRYPT_EMAIL=you@example.com
 
 # --- CouchDB ---------------------------------------------------------

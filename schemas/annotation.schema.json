@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/annotation.schema.json",
+  "title": "Annotation",
+  "description": "A single state of a (project, case) pair in its review lifecycle. Each save produces a new Annotation document with predecessor pointing at the previous one; the chain is the full history. The 'producer' field distinguishes whether this state came from a human (manual), a model run (model), or a status-only update by a reviewer (review). When seg_ref is set, this Annotation also defines the current segmentation; when seg_ref is null, it's a pure status/notes change that inherits the seg from its predecessor.",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "project_id", "case_id", "status", "producer"],
+      "properties": {
+        "type": { "const": "Annotation" },
+        "_id": { "pattern": "^annotation:" },
+        "project_id": {
+          "type": "string",
+          "pattern": "^project:",
+          "description": "Reference to the Project this Annotation belongs to."
+        },
+        "case_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifier of the case within the project's resolved cohort. Free-form string; for the lnq-retro import this is e.g. 'case_0042'. For DICOM-sourced cohorts, prefer using study_uid as the case identifier."
+        },
+        "study_uid": {
+          "type": ["string", "null"],
+          "description": "DICOM Study Instance UID, when this case has DICOM provenance. Null for purely file-based imports."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["todo", "in_progress", "submitted_for_review", "needs_changes", "approved", "needs_consultation"],
+          "description": "Workflow state. todo: case exists but no work done. in_progress: annotator is working. submitted_for_review: annotator finished, awaiting review. needs_changes: reviewer rejected, back to annotator. approved: reviewer accepted; eligible for training. needs_consultation: flagged for second opinion."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Markdown notes attached to this state. Annotator notes on submit, reviewer comments on approve/reject, etc."
+        },
+        "producer": {
+          "type": "object",
+          "required": ["kind"],
+          "description": "Who or what produced this state.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["manual", "model", "review"],
+              "description": "manual: a human drew or corrected the segmentation. model: this state is an inference run output. review: pure status/notes change with no segmentation modification (seg_ref inherits from predecessor)."
+            },
+            "label": {
+              "type": "string",
+              "description": "Human-readable label for the producer. For models, e.g. 'retro6'. For manual, e.g. 'manual-v1' or the annotator's name."
+            },
+            "model_generation_id": {
+              "type": ["string", "null"],
+              "description": "Reference to a ModelGeneration document, when kind=model. Null until ModelGeneration documents are bootstrapped."
+            }
+          },
+          "additionalProperties": false
+        },
+        "seg_ref": {
+          "type": ["object", "null"],
+          "description": "Reference to the segmentation file/object for this state. Null when this Annotation is a status-only update; the seg is inherited from the predecessor's chain.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["local-uri", "dicomweb"],
+              "description": "local-uri: file:// or manila:// path. dicomweb: a WADO-RS URL referencing a SEG instance."
+            },
+            "value": { "type": "string", "minLength": 1 },
+            "sha256": { "type": ["string", "null"] },
+            "size": { "type": ["integer", "null"] }
+          },
+          "required": ["kind", "value"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

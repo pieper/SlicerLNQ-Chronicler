@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/inferencerun.schema.json",
+  "title": "InferenceRun",
+  "description": "A model applied to a set of cases. Records which model, which cases, and which Annotation documents the run produced. The output Annotations are the user-facing artefact; the InferenceRun is the bookkeeping that ties them together so 'all model X outputs from run Y' is a single query.",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "project_id", "model_generation_id", "case_ids"],
+      "properties": {
+        "type": { "const": "InferenceRun" },
+        "_id": { "pattern": "^inferencerun:" },
+
+        "project_id": {
+          "type": "string",
+          "pattern": "^project:",
+          "description": "The Project this run targets. Output Annotations are scoped to this Project."
+        },
+        "model_generation_id": {
+          "type": "string",
+          "pattern": "^modelgeneration:",
+          "description": "Which model produced these outputs."
+        },
+        "case_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "The cohort case_ids this run targeted. Output Annotations should be created for every case_id; missing ones indicate per-case failures."
+        },
+
+        "output_annotation_ids": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "pattern": "^annotation:" },
+          "description": "Annotations produced by this run, one per successful case. Filled in after the run completes."
+        },
+        "hardware": {
+          "type": ["object", "null"],
+          "description": "Free-form hardware fingerprint of the machine that ran inference."
+        },
+        "software": {
+          "type": ["object", "null"],
+          "description": "Free-form software fingerprint."
+        },
+        "log_ref": {
+          "type": ["object", "null"],
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["local-uri", "swift", "https"] },
+            "value": { "type": "string", "minLength": 1 }
+          }
+        },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": ["string", "null"] }
+      }
+    }
+  ]
+}

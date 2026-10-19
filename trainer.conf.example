@@ -1,0 +1,73 @@
+# Copy this to trainer.conf and fill in. trainer.conf is gitignored.
+# Sourced by bin/trainer.sh.
+
+# --- OpenStack (Js2) -------------------------------------------------
+OS_CLOUD=MED250016_IU
+
+# --- Instance shape --------------------------------------------------
+IMAGE=Featured-Ubuntu24
+FLAVOR=g3.xl
+NETWORK=auto_allocated_network
+KEY_NAME=lnq-chronicler-deploy
+# default + auto-created lnq-trainer (SSH-22 only). Keep "default" for
+# project-internal traffic to the Manila share.
+SECURITY_GROUPS=default,lnq-trainer
+PUBLIC_SECGROUP=lnq-trainer
+
+# --- SSH -------------------------------------------------------------
+SSH_KEY=$HOME/.ssh/lnq-chronicler-deploy
+SSH_USER=ubuntu
+
+# Floating IP attached to the fold-0 instance for ad-hoc SSH. Other folds
+# rent no FIP and are reached via the chronicle box as jump host.
+# Reserve one, then list it:
+#   openstack --os-cloud "$OS_CLOUD" floating ip create public
+#   openstack --os-cloud "$OS_CLOUD" floating ip list -f value -c "Floating IP Address"
+# Optional — trainer.sh skips FIP attachment when this is empty.
+FLOATING_IP=fill-in-from-floating-ip-list
+
+# Public FIP of the chronicle box — copy from your (gitignored)
+# chronicle.conf FLOATING_IP.
+# `bin/trainer.sh ssh <name>` auto-falls-back to `ssh -J $JUMP_USER@$JUMP_HOST`
+# for any trainer instance that has no FIP attached.
+JUMP_HOST=fill-in-from-chronicle.conf-FLOATING_IP
+JUMP_USER=ubuntu
+
+# --- Chronicle (where the trainer reports status) --------------------
+# These are baked into the cloud-init user-data and land on the instance
+# at /opt/lnq/chronicle.conf with mode 0600. Anyone with project-admin
+# in this OpenStack project can read user-data — acceptable for now.
+CHRONICLE_URL=https://lnq-chronicle.isomics.dev
+CHRONICLE_DB=lnq
+COUCHDB_ADMIN_PASSWORD=fill-in-from-SlicerLNQ-Chronicler/chronicle.conf
+
+# --- Manila / CephFS share (LNQ-data) --------------------------------
+# Required. The export location names the Ceph monitors and the share UUID,
+# so it is kept out of git along with everything else in trainer.conf. Get it:
+#   openstack --os-cloud "$OS_CLOUD" share show LNQ-data \
+#     -f value -c export_locations
+MANILA_SHARE_NAME=LNQ-data
+MANILA_SHARE_PATH="fill-in-from-share-show-export_locations"
+MANILA_ACCESS_RULE_NAME=LNQ-data-rw
+# SECRET — do not commit a real value here. Get it with:
+#   openstack --os-cloud "$OS_CLOUD" share access list LNQ-data
+MANILA_ACCESS_RULE_KEY=fill-in-from-share-access-list
+MOUNT_POINT=/media/share/LNQ-data
+
+# --- nnU-Net dataset layout on the share -----------------------------
+# The trainer-runner uses these as nnU-Net's env vars. Folds running on
+# different instances share these directories on the Manila mount, so
+# preprocessing is one-shot (file-locked) and per-fold checkpoints live
+# in fold_<N>/ subdirs.
+NNUNET_BASE=/media/share/LNQ-data/Inguinal_Syed
+
+# --- Where the trainer instance fetches its bin/ scripts -------------
+# cloud-init pulls trainer-runner.py and export-nnunet-dataset.py from this
+# base URL, appending /trainer-runner.py and /export-nnunet-dataset.py.
+#
+# Today this is a public gist, kept byte-identical to the copies in bin/.
+# When this repo is published it should point at a tagged raw URL of the
+# repo's own bin/ instead, so the trainer provably runs the committed code:
+#   https://raw.githubusercontent.com/<org>/SlicerLNQ-Chronicler/<tag>/bin
+# The org and tag are not settled yet — see docs/training.md.
+BIN_BASE_URL=https://gist.githubusercontent.com/pieper/ea740fee37abde0f4aa2612338b410a7/raw

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/trainingjob.schema.json",
+  "title": "TrainingJob",
+  "description": "A planned or in-flight training run. Identity (project, training annotation set, config, fold) is immutable once created; the live status fields (status, current_epoch, heartbeat, latest_metrics, model_generation_id, log_ref) are mutable so the trainer can publish progress without writing a new doc per heartbeat. On convergence the trainer also writes a ModelGeneration doc and updates this job's model_generation_id + status=converged. Use ModelGeneration as the canonical reference for any downstream Inference; TrainingJob is the operational/dashboard view.",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "project_id", "label", "training_annotation_ids", "config", "status"],
+      "properties": {
+        "type": { "const": "TrainingJob" },
+        "_id": { "pattern": "^trainingjob:" },
+
+        "project_id": {
+          "type": "string",
+          "pattern": "^project:"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable model label, e.g. 'inguinal-retro1'. Inherits to ModelGeneration on convergence."
+        },
+        "training_annotation_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^annotation:" }
+        },
+        "config": {
+          "type": "object",
+          "required": ["framework", "config_name"],
+          "properties": {
+            "framework": { "type": "string", "description": "e.g. 'nnUNetv2'" },
+            "planner": { "type": ["string", "null"] },
+            "config_name": { "type": "string", "description": "e.g. '3d_fullres'" },
+            "fold": { "type": ["integer", "null"], "minimum": 0 },
+            "dataset_id": { "type": ["integer", "null"], "minimum": 0 },
+            "task_name": { "type": ["string", "null"] },
+            "total_epochs": { "type": ["integer", "null"], "minimum": 1 }
+          }
+        },
+
+        "status": {
+          "type": "string",
+          "enum": ["pending", "running", "converged", "failed", "cancelled"]
+        },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "last_heartbeat_at": { "type": ["string", "null"], "format": "date-time" },
+        "current_epoch": { "type": ["integer", "null"], "minimum": 0 },
+        "latest_metrics": {
+          "type": ["object", "null"],
+          "description": "Most recent train_loss / val_loss / mean_dice / per_class_dice etc. Free-form so the trainer can pass through whatever it has."
+        },
+        "host": {
+          "type": ["string", "null"],
+          "description": "Trainer instance label (e.g. 'lnq-trainer-1')."
+        },
+        "log_ref": {
+          "type": ["object", "null"],
+          "description": "Where progress.png + training_log_*.txt live (Swift bucket, local-uri on the trainer, etc.)."
+        },
+        "model_generation_id": {
+          "type": ["string", "null"],
+          "pattern": "^modelgeneration:"
+        },
+        "notes": { "type": ["string", "null"] }
+      }
+    }
+  ]
+}

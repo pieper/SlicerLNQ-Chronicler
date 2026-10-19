@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/common.schema.json",
+  "title": "LNQ common definitions",
+  "description": "Shared definitions reused across LNQ document schemas.",
+  "$defs": {
+    "BaseDocument": {
+      "type": "object",
+      "required": ["_id", "type", "name", "created_at", "created_by", "version", "predecessor"],
+      "properties": {
+        "_id": {
+          "type": "string",
+          "description": "CouchDB document ID; format <type-prefix>:<uuid>."
+        },
+        "_rev": {
+          "type": "string",
+          "description": "CouchDB revision token; set by the server, must not be present on first write."
+        },
+        "type": {
+          "type": "string",
+          "description": "Discriminator. Must match the schema's expected type."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable label."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp, e.g. 2026-05-06T15:23:11Z."
+        },
+        "created_by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Writer's CouchDB username (or OIDC subject in phase 2b)."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Version number for this logical entity. Starts at 1; bumps for each new version."
+        },
+        "predecessor": {
+          "type": ["string", "null"],
+          "description": "_id of the previous version, or null when version == 1."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "version": { "const": 1 } } },
+          "then": { "properties": { "predecessor": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "version": { "minimum": 2 } } },
+          "then": { "properties": { "predecessor": { "type": "string", "minLength": 1 } } }
+        }
+      ]
+    },
+    "TerminologyCode": {
+      "type": "object",
+      "description": "DICOM-style controlled-terminology code triple.",
+      "required": ["scheme", "value", "meaning"],
+      "properties": {
+        "scheme": {
+          "type": "string",
+          "description": "Coding scheme designator, e.g. SCT (SNOMED-CT), DCM (DICOM), FMA, NCIt, RADLEX.",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string",
+          "description": "Code value within the scheme.",
+          "minLength": 1
+        },
+        "meaning": {
+          "type": "string",
+          "description": "Code meaning (display string).",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "RGBColor": {
+      "type": "array",
+      "description": "8-bit sRGB triple.",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 3,
+      "maxItems": 3
+    }
+  }
+}

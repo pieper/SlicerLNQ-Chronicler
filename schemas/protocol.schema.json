@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/protocol.schema.json",
+  "title": "Protocol",
+  "description": "Annotation SOP. Defines the controlled-terminology color table that annotators paint with and the prose decision rules for ambiguous boundaries. A Protocol is referenced by Projects; updating an SOP means a new Protocol document with predecessor pointing at the old one.",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "color_table"],
+      "properties": {
+        "type": { "const": "Protocol" },
+        "_id": { "pattern": "^protocol:" },
+        "description": {
+          "type": "string",
+          "description": "Markdown SOP: scope, intended users, scan modalities, region of interest."
+        },
+        "color_table": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The labeled segments annotators may paint, in label-id order. Each entry binds a label integer (as written into a SEG) to a name, a display color, and a controlled-terminology code.",
+          "items": {
+            "type": "object",
+            "required": ["label", "name", "color", "code"],
+            "properties": {
+              "label": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Label integer used in the segmentation pixel data. 0 is reserved for background."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable name shown in the Slicer UI."
+              },
+              "color": { "$ref": "common.schema.json#/$defs/RGBColor" },
+              "code": { "$ref": "common.schema.json#/$defs/TerminologyCode" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "rules": {
+          "type": "string",
+          "description": "Markdown decision rules for ambiguous boundaries: what to include, what to exclude, how to handle conflicts. Plain prose; no schema beyond 'a string'."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lnq-chronicle.isomics.dev/schemas/blob.schema.json",
+  "title": "Blob",
+  "description": "Content-addressed catalog entry for a file. The Blob doc is the identity — its _id encodes the SHA-256 hash — and its locations array records where copies of the same bytes can be found. Locations are mutable (machines come and go, caches fill and empty); identity fields (sha256, size, mime_type) are immutable. Other typed documents (Annotation, CohortResolution, ModelGeneration) refer to file content by blob_id, so moving data between machines only requires updating Blob.locations, never the workflow docs themselves.",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/BaseDocument" },
+    {
+      "type": "object",
+      "required": ["type", "sha256", "size", "locations"],
+      "properties": {
+        "type": { "const": "Blob" },
+        "_id": {
+          "type": "string",
+          "pattern": "^blob:[0-9a-f]{64}$",
+          "description": "blob:<sha256> — the hash IS the identity."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mime_type": {
+          "type": ["string", "null"],
+          "description": "Optional. e.g. 'application/octet-stream+nrrd', 'application/dicom+json'."
+        },
+        "locations": {
+          "type": "array",
+          "description": "Known places where these bytes can be found. Order is not meaningful; resolvers pick by reachability.",
+          "items": {
+            "type": "object",
+            "required": ["kind", "value"],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["local-uri", "swift", "https", "equivalent-volume"],
+                "description": "local-uri|swift|https: bytes at value are sha256-identical to the Blob (the canonical case). equivalent-volume: the file at value has a different file_sha256 but its decompressed voxel array is sha256-equivalent (recorded as voxel_sha256 on this entry) -- used when an upstream pipeline re-encoded the file (different writer, different gzip OS byte, different float-to-string repr) without altering the scientific content."
+              },
+              "value": { "type": "string", "minLength": 1 },
+              "host": {
+                "type": ["string", "null"],
+                "description": "Hostname or label of the machine this location lives on (e.g. 'pieper-mac', 'js2-core'). Hint for resolvers; not authoritative."
+              },
+              "verified_at": {
+                "type": ["string", "null"],
+                "format": "date-time",
+                "description": "When this location was last confirmed to hold matching bytes."
+              },
+              "file_sha256": {
+                "type": ["string", "null"],
+                "description": "Required when kind == equivalent-volume: the sha256 of the file's raw bytes at value (distinct from the Blob's _id-bound sha256)."
+              },
+              "voxel_sha256": {
+                "type": ["string", "null"],
+                "description": "Required when kind == equivalent-volume: sha256 of the decompressed voxel array in C-order. The basis for the equivalence claim."
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

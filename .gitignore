@@ -1,5 +1,12 @@
-# Local config (contains secrets)
+# Local config (contains secrets). The glob catches variants like
+# chronicle.conf.old-CIS230102, which hold real passwords and access keys;
+# only the *.example templates are tracked.
 chronicle.conf
+chronicle.conf.*
+!chronicle.conf.example
+trainer.conf
+trainer.conf.*
+!trainer.conf.example
 
 # Local secrets / cloud config
 clouds.yaml
@@ -12,3 +19,11 @@ clouds.yaml
 *.swp
 .vscode/
 .idea/
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+
+# Preserved server logs (contain IPs / auth records) — keep local
+forensics-*/

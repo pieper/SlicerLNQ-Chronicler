@@ -1,0 +1,229 @@
+#cloud-config
+# LNQ trainer instance — one Js2 GPU box running one nnU-Net v2 fold.
+#
+# First boot: install CUDA + drivers + Python venv + nnU-Net, mount the Manila
+# share, write the runner files + systemd unit, then reboot to load the kernel
+# driver. Second boot: lnq-trainer-runner.service auto-starts (enabled at first
+# boot), reports progress to the Chronicle's TrainingJob.
+#
+# Templated variables (envsubst on the lifecycle script's side):
+#   ${CHRONICLE_URL}, ${CHRONICLE_DB}, ${COUCHDB_ADMIN_PASSWORD}
+#   ${MANILA_SHARE_NAME}, ${MANILA_SHARE_PATH}
+#   ${MANILA_ACCESS_RULE_NAME}, ${MANILA_ACCESS_RULE_KEY}
+#   ${MOUNT_POINT}, ${NNUNET_BASE}, ${TRAINING_JOB_ID}
+#
+# Other shell substitutions are escaped as $$VAR — envsubst leaves them alone.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - git
+  - python3-venv
+  - python3-pip
+  - python3-dev
+  - python3-setuptools
+  - build-essential
+  - ceph-common
+  - jq
+  - rsync
+
+write_files:
+  - path: /opt/lnq/chronicle.conf
+    permissions: "0600"
+    content: |
+      CHRONICLE_URL=${CHRONICLE_URL}
+      CHRONICLE_DB=${CHRONICLE_DB}
+      COUCHDB_ADMIN_PASSWORD=${COUCHDB_ADMIN_PASSWORD}
+      NNUNET_BASE=${NNUNET_BASE}
+
+  - path: /etc/lnq/job.conf
+    permissions: "0644"
+    content: |
+      TRAINING_JOB_ID=${TRAINING_JOB_ID}
+      NNUNET_BASE=${NNUNET_BASE}
+      # SMOKE_TEST=1 makes trainer-runner.py verify the GPU + nnunetv2 are
+      # alive and write a dummy checkpoint instead of running plan_and_preprocess
+      # / nnUNetv2_train. Used to validate the whole orchestration without
+      # burning SU on real training.
+      SMOKE_TEST=${SMOKE_TEST}
+
+  - path: /etc/systemd/system/lnq-trainer-runner.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=LNQ nnU-Net trainer runner
+      After=network-online.target cloud-final.service
+      Wants=network-online.target
+      # No ConditionPathExists: the nvidia driver loads after first boot
+      # and may not be there when this unit is first started. The runner's
+      # very first action is to PUT status=running on the Chronicle, then
+      # call torch.cuda; if CUDA isn't ready the runner crashes, systemd
+      # waits 30 s, retries. Once the driver is up the runner succeeds.
+      # (The original ConditionPathExists made the unit go inactive for
+      # good when nvidia0 wasn't there at first start — required manual SSH
+      # to bring it back, which the user explicitly objects to.)
+
+      [Service]
+      Type=simple
+      User=root
+      EnvironmentFile=/opt/lnq/chronicle.conf
+      EnvironmentFile=/etc/lnq/job.conf
+      # Prepend the nnenv venv to PATH so subprocess.Popen calls inside the
+      # runner (nnUNetv2_plan_and_preprocess, nnUNetv2_train) resolve. Systemd's
+      # default PATH doesn't include /opt/lnq/nnenv/bin and bare-command lookup
+      # would otherwise FileNotFoundError.
+      Environment="PATH=/opt/lnq/nnenv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      WorkingDirectory=/opt/lnq
+      ExecStart=/opt/lnq/nnenv/bin/python /opt/lnq/trainer-runner.py
+      Restart=on-failure
+      RestartSec=30
+      # nnU-Net is happiest with plenty of FDs and threads.
+      LimitNOFILE=65536
+      TasksMax=infinity
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Health publisher — runs every 60 s starting at first boot, INDEPENDENT
+  # of the GPU / nvidia driver / runner. Writes runtime_telemetry onto the
+  # TrainingJob doc so the dashboard always reflects current instance state,
+  # including when the runner can't start.
+  - path: /etc/systemd/system/lnq-trainer-health.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=LNQ trainer health publisher (one-shot)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      EnvironmentFile=-/opt/lnq/chronicle.conf
+      EnvironmentFile=-/etc/lnq/job.conf
+      ExecStart=/opt/lnq/nnenv/bin/python /opt/lnq/trainer-health.py
+      TimeoutStartSec=45
+
+  - path: /etc/systemd/system/lnq-trainer-health.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=LNQ trainer health publisher (every 60 s)
+
+      [Timer]
+      OnBootSec=20s
+      OnUnitInactiveSec=60s
+      AccuracySec=5s
+      Unit=lnq-trainer-health.service
+
+      [Install]
+      WantedBy=timers.target
+
+  # The 'mount LNQ-data' helper, parameterised so a re-run after reboot
+  # is idempotent. Called from runcmd at first boot and at runtime if the
+  # mount drops.
+  - path: /opt/lnq/mount-share.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -e
+      mountpoint -q "${MOUNT_POINT}" && exit 0
+      mkdir -p "${MOUNT_POINT}"
+      curl -fsSL https://jetstream2.exosphere.app/exosphere/assets/scripts/mount_ceph.py \
+        | sudo python3 - mount \
+          --access-rule-name="${MANILA_ACCESS_RULE_NAME}" \
+          --access-rule-key="${MANILA_ACCESS_RULE_KEY}" \
+          --share-path="${MANILA_SHARE_PATH}" \
+          --share-name="${MANILA_SHARE_NAME}"
+
+  # Vendored copies of the trainer-runner + dataset exporter, written by the
+  # lifecycle script at create-time. We use placeholders here so the path
+  # exists; the real bytes come from runcmd below.
+  - path: /opt/lnq/trainer-runner.py
+    permissions: "0755"
+    content: |
+      # placeholder — overwritten in runcmd below
+      print("trainer-runner.py not yet installed")
+
+  - path: /opt/lnq/export-nnunet-dataset.py
+    permissions: "0755"
+    content: |
+      # placeholder — overwritten in runcmd below
+      print("export-nnunet-dataset.py not yet installed")
+
+runcmd:
+  # --- Pin chronicle.isomics.dev to its Js2 internal IP -----------------
+  # Without this, the trainer's outbound packets to the chronicle's FIP get
+  # SNAT-NAT-hairpinned by neutron and silently dropped ('No route to host')
+  # on this project's L2 net. Speaking to the chronicle by its internal IP
+  # while keeping the SNI hostname lets Caddy's cert still validate. Empty
+  # CHRONICLE_INTERNAL_IP is fine for setups where direct routing works.
+  # Shell vars use ${VAR} (envsubst leaves them alone — only the names in the
+  # trainer.sh envsubst allowlist are substituted). Do NOT escape these as
+  # $$VAR; envsubst keeps $$ literal and the shell then reads $$VAR as
+  # "<PID>VAR", silently mis-writing /etc/hosts.
+  - |
+    if [ -n "${CHRONICLE_INTERNAL_IP}" ]; then
+      DOMAIN="$(echo "${CHRONICLE_URL}" | sed -E 's,^https?://([^/]+).*,\1,')"
+      if ! grep -qE "[[:space:]]${DOMAIN}$" /etc/hosts 2>/dev/null; then
+        echo "${CHRONICLE_INTERNAL_IP} ${DOMAIN}" >> /etc/hosts
+      fi
+    fi
+
+  # --- Pull the runner + exporter scripts from BIN_BASE_URL --------------
+  # The trainer.sh -> envsubst hop kept the script body out of user-data to
+  # stay well under the 64 KB instance-metadata cap. BIN_BASE_URL points at a
+  # raw-URL prefix; today this is a gist, but when SlicerLNQ-Chronicler is
+  # published the URL switches to raw.githubusercontent.com/pieper/.../main/bin
+  # in trainer.conf and the template is unchanged.
+  - install -d -m 0755 /opt/lnq
+  - curl -fsSL "${BIN_BASE_URL}/trainer-runner.py"        -o /opt/lnq/trainer-runner.py
+  - curl -fsSL "${BIN_BASE_URL}/export-nnunet-dataset.py" -o /opt/lnq/export-nnunet-dataset.py
+  - curl -fsSL "${BIN_BASE_URL}/trainer-health.py"        -o /opt/lnq/trainer-health.py
+  - chmod +x /opt/lnq/trainer-runner.py /opt/lnq/export-nnunet-dataset.py /opt/lnq/trainer-health.py
+
+  # --- Manila / CephFS mount ------------------------------------------
+  - /opt/lnq/mount-share.sh
+
+  # --- NVIDIA CUDA toolkit + driver -----------------------------------
+  - install -d -m 0755 /etc/apt/keyrings
+  - curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb
+  - dpkg -i /tmp/cuda-keyring.deb
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit-12-6 cuda-drivers
+
+  # --- Python venv + nnU-Net v2 --------------------------------------
+  # PyTorch wheels for CUDA 12.x.
+  - python3 -m venv /opt/lnq/nnenv
+  - /opt/lnq/nnenv/bin/pip install --upgrade pip wheel
+  - /opt/lnq/nnenv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cu126 torch torchvision
+  - /opt/lnq/nnenv/bin/pip install nnunetv2 requests
+
+  # --- Enable the runner; reboot to load the nvidia driver -----------
+  - systemctl daemon-reload
+  - systemctl enable lnq-trainer-runner.service
+  - systemctl enable lnq-trainer-health.timer
+  # Fire one health publish immediately so the dashboard reflects pre-reboot state.
+  - systemctl start lnq-trainer-health.service || true
+
+  # progress.png + logs land here on the share so the dashboard can reach them.
+  - install -d -o root -g root "${NNUNET_BASE}/nnUNet_raw"
+  - install -d -o root -g root "${NNUNET_BASE}/nnUNet_preprocessed"
+  - install -d -o root -g root "${NNUNET_BASE}/nnUNet_results"
+
+  - touch /var/lib/cloud/instance/first-boot-setup-done
+
+# Reboot after cloud-init so the kernel reloads with the nvidia driver. The
+# trainer-runner.service is enabled but won't start (ConditionPathExists=
+# /dev/nvidia0 fails) on the first boot — after the reboot, the device exists
+# and the runner fires.
+power_state:
+  mode: reboot
+  message: "First-boot setup complete; rebooting to load NVIDIA driver."
+  timeout: 30
+  condition: True
+
+final_message: "LNQ trainer first-boot done (${TRAINING_JOB_ID}); rebooting."
