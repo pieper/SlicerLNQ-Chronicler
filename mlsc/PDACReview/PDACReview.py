@@ -114,8 +114,23 @@ class PDACReviewLogic(ScriptedLoadableModuleLogic):
         with open(path) as f:
             self.stats = json.load(f)
         self.statsPath = path
+        self._rebasePaths(root)
         self._byVolume = {v["volume_id"]: v for v in self.stats.get("volumes", [])}
         return self.stats
+
+    def _rebasePaths(self, root):
+        """pdac_stats.json records absolute paths from the machine that
+        computed it (e.g. /Volumes/12T/PHI/PDAC). Re-derive every path from
+        the current Data root so a copy of the tree — a Dropbox folder on
+        someone else's machine — works without recomputing."""
+        for v in self.stats.get("volumes", []):
+            vol_dir = os.path.join(root, v["case_id"], v["series_dir"])
+            v["ct_path"] = os.path.join(vol_dir, "ct.nrrd")
+            for entry in v.get("models", {}).values():
+                for key in ("seg_path", "prob_path"):
+                    if entry.get(key):
+                        entry[key] = os.path.join(vol_dir, os.path.basename(entry[key]))
+        self.stats["root"] = root
 
     def computeStats(self, root, min_node_ml, force=False, progress=None):
         import pdac_stats  # <repo>/mlsc/pdac_stats.py
