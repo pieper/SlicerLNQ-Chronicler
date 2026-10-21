@@ -50,6 +50,7 @@ import datetime
 import hashlib
 import json
 import os
+import pickle
 import re
 import shutil
 import socket
@@ -115,6 +116,69 @@ def discover_folds(plans_dir):
     return out
 
 
+class _StubUnpickler(pickle.Unpickler):
+    """Unpickles a torch checkpoint's metadata without torch: every non-builtin class is a stub,
+    and tensor storages come back as None. nnU-Net's checkpoint is a dict whose 'trainer_name'
+    and 'init_args' are plain str/dict values, so those survive intact."""
+
+    class _Stub:
+        def __init__(self, *a, **k):
+            pass
+
+        def __call__(self, *a, **k):          # a reduce's result may still get BUILD's setstate
+            return _StubUnpickler._Stub()
+
+        def __setstate__(self, state):
+            pass
+
+    def find_class(self, module, name):
+        if module in ("builtins", "collections", "copyreg", "_codecs", "datetime"):
+            return super().find_class(module, name)
+        return self._Stub()
+
+    def persistent_load(self, pid):
+        return None
+
+
+def checkpoint_meta(path):
+    """(trainer_name, configuration) from an nnU-Net checkpoint_final.pth, stdlib only.
+
+    A torch checkpoint is a zip holding <archive>/data.pkl; its top-level dict carries
+    'trainer_name' and 'init_args' (with 'configuration'), which is what
+    nnUNetPredictor.initialize_from_trained_model_folder rebuilds the model from."""
+    with zipfile.ZipFile(path) as zf:
+        member = next((n for n in zf.namelist() if n.endswith("/data.pkl") or n == "data.pkl"), None)
+        if member is None:
+            raise SystemExit(f"{path}: not a torch zip checkpoint (no data.pkl)")
+        data = _StubUnpickler(zf.open(member)).load()
+    trainer = data.get("trainer_name")
+    config = (data.get("init_args") or {}).get("configuration")
+    if not (isinstance(trainer, str) and isinstance(config, str)):
+        raise SystemExit(f"{path}: no trainer_name / init_args.configuration in the checkpoint")
+    return trainer, config
+
+
+def model_folder_parts(source_plans_dir, plans_json_path, folds):
+    """(trainer, plans, configuration) of the model being published.
+
+    Read from the model itself - the first fold's checkpoint and plans.json's plans_name - not
+    parsed from the source folder's name: abdominopelvic-v1, axillary-v1 and mediastinal-v1 were
+    published from folders named after the model, the parse found nothing, and their card and
+    registry entry shipped with all three blank (lnq-segmenter fixed the registry in 0.3.1). A
+    source folder that IS named <trainer>__<plans>__<config> must agree with its contents."""
+    with open(plans_json_path) as f:
+        plans = json.load(f).get("plans_name")
+    if not plans:
+        raise SystemExit(f"{plans_json_path}: no plans_name")
+    trainer, config = checkpoint_meta(os.path.join(folds[0][1], "checkpoint_final.pth"))
+    parts = (trainer, plans, config)
+    named = tuple(os.path.basename(source_plans_dir.rstrip("/")).split("__"))
+    if len(named) == 3 and named != parts:
+        raise SystemExit(f"{source_plans_dir}: the folder is named {'__'.join(named)} but "
+                         f"its checkpoint and plans say {'__'.join(parts)}")
+    return parts
+
+
 def stage_bundle(source_plans_dir, staged_dir):
     """Copy the canonical nnU-Net structure into staged_dir/. Layout
     matches what nnUNetPredictor.initialize_from_trained_model_folder()
@@ -123,7 +187,7 @@ def stage_bundle(source_plans_dir, staged_dir):
         <staged_dir>/
           dataset.json
           plans.json
-          <plans_subdir_name>/
+          <trainer>__<plans>__<configuration>/     (always; see model_folder_parts)
             fold_0/checkpoint_final.pth
             fold_1/checkpoint_final.pth
             ...
@@ -144,12 +208,15 @@ def stage_bundle(source_plans_dir, staged_dir):
     # we strip checkpoint_latest.pth, optimizer state, .log files, etc. to keep
     # the bundle small; predictor only needs final + dataset_fingerprint.json
     # + the plans.json above).
-    plans_subdir = os.path.basename(source_plans_dir.rstrip("/"))
-    bundle_plans = os.path.join(staged_dir, plans_subdir)
-    os.makedirs(bundle_plans, exist_ok=True)
+    # The model folder is staged under nnU-Net's stock name, whatever the source folder is
+    # called, so tools that know a model folder by its name (haversack) can run the bundle.
     folds = discover_folds(source_plans_dir)
     if not folds:
         raise SystemExit(f"no fold_*/checkpoint_final.pth in {source_plans_dir}")
+    parts = model_folder_parts(source_plans_dir, os.path.join(staged_dir, "plans.json"), folds)
+    plans_subdir = "__".join(parts)
+    bundle_plans = os.path.join(staged_dir, plans_subdir)
+    os.makedirs(bundle_plans, exist_ok=True)
     for fold_i, fold_src in folds:
         fold_dst = os.path.join(bundle_plans, f"fold_{fold_i}")
         os.makedirs(fold_dst, exist_ok=True)
@@ -165,7 +232,7 @@ def stage_bundle(source_plans_dir, staged_dir):
             if os.path.isfile(candidate):
                 shutil.copy2(candidate, os.path.join(staged_dir, opt))
                 break
-    return folds, plans_subdir
+    return folds, plans_subdir, parts
 
 
 LICENSE_URLS = {
@@ -188,14 +255,12 @@ def attribution_for(card):
 
 def make_card(mg, name, version, display_name, license_str, folds,
               plans_subdir, source_plans_dir, recommended_use,
-              chronicle_url):
+              chronicle_url, parts):
     """Build the model card JSON. Lives inside the bundle so the Slicer
     extension's 'Model info' panel can read it without round-tripping to
     chronicle. Mirrors the registry entry's metadata but with more prose
     fields (license details, recommended use, known failure modes)."""
-    cfg_match = re.match(r"(\w+)__(\w+)__(\w+)", plans_subdir)
-    trainer_class, plans_identifier, configuration = (
-        cfg_match.groups() if cfg_match else ("", "", ""))
+    trainer_class, plans_identifier, configuration = parts   # from the model: model_folder_parts
     return {
         "schema": "lnq-model-card/1",
         "name": name,
@@ -373,8 +438,9 @@ def main():
         shutil.rmtree(staged_dir)
     os.makedirs(staged_dir)
     print(f"[publish] staging into {staged_dir}", flush=True)
-    folds, plans_subdir = stage_bundle(args.source_path, staged_dir)
+    folds, plans_subdir, parts = stage_bundle(args.source_path, staged_dir)
     print(f"[publish] folds = {[f for f, _ in folds]}", flush=True)
+    print(f"[publish] model folder = {plans_subdir}", flush=True)
 
     card = make_card(
         mg=mg, name=args.name, version=args.version,
@@ -382,7 +448,7 @@ def main():
         folds=folds, plans_subdir=plans_subdir,
         source_plans_dir=args.source_path,
         recommended_use=args.recommended_use,
-        chronicle_url=chronicle_url,
+        chronicle_url=chronicle_url, parts=parts,
     )
     card_path = os.path.join(staged_dir, "card.json")
     with open(card_path, "w") as f:
